@@ -62,11 +62,12 @@ jobs:
           fi
           VERSION=$(node -p "require('./package.json').version")
           SOURCE="${zips[0]}"
-          TARGET="$ZIP_DIR/MMD.modoki-${RELEASE_PLATFORM}-arm64-${VERSION}.zip"
+          TARGET="MMD.modoki-${RELEASE_PLATFORM}-arm64-${VERSION}.zip"
           if [ "$SOURCE" != "$TARGET" ]; then
             mv "$SOURCE" "$TARGET"
           fi
-          echo "Renamed $(basename "$SOURCE") -> $(basename "$TARGET")"
+          echo "Moved $(basename "$SOURCE") -> $(basename "$TARGET")"
+          echo "artifact_path=./$TARGET" >> $GITHUB_ENV
         env:
           RELEASE_PLATFORM: ${{ matrix.release_platform }}
 
@@ -74,5 +75,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact_name }}
-          path: out/make/**/*.zip
+          path: ${{ env.artifact_path }}
           if-no-files-found: error
