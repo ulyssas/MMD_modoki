@@ -1,0 +1,78 @@
+name: Build ARM Zip Packages
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-zips:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: Windows Zip
+            os: windows-latest
+            forge_platform: win32
+            release_platform: windows
+            artifact_name: mmd-modoki-windows-arm64-zip
+          - label: macOS Zip
+            os: macos-latest
+            forge_platform: darwin
+            release_platform: mac
+            artifact_name: mmd-modoki-macos-arm64-zip
+          - label: Linux Zip
+            os: ubuntu-latest
+            forge_platform: linux
+            release_platform: linux
+            artifact_name: mmd-modoki-linux-arm64-zip
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Build zip package
+        run: npm run make:zip -- --platform=${{ matrix.forge_platform }} --arch=arm64
+
+      - name: Rename zip for release
+        shell: bash
+        run: |
+          ZIP_DIR="out/make/zip/${{ matrix.forge_platform }}/arm64"
+          shopt -s nullglob
+          zips=("$ZIP_DIR"/*.zip)
+          if [ "${#zips[@]}" -ne 1 ]; then
+            echo "Expected exactly one zip file in $ZIP_DIR, found:"
+            printf '  %s\n' "${zips[@]}"
+            exit 1
+          fi
+          VERSION=$(node -p "require('./package.json').version")
+          SOURCE="${zips[0]}"
+          TARGET="$ZIP_DIR/MMD.modoki-${RELEASE_PLATFORM}-arm64-${VERSION}.zip"
+          if [ "$SOURCE" != "$TARGET" ]; then
+            mv "$SOURCE" "$TARGET"
+          fi
+          echo "Renamed $(basename "$SOURCE") -> $(basename "$TARGET")"
+        env:
+          RELEASE_PLATFORM: ${{ matrix.release_platform }}
+
+      - name: Upload zip artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: out/make/**/*.zip
+          if-no-files-found: error
