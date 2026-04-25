@@ -1,16 +1,619 @@
 import { Effect } from "@babylonjs/core/Materials/effect";
 import { ColorCurves } from "@babylonjs/core/Materials/colorCurves";
 import { ColorGradingTexture } from "@babylonjs/core/Materials/Textures/colorGradingTexture";
+import { BloomEffect } from "@babylonjs/core/PostProcesses/bloomEffect";
 import { DefaultRenderingPipeline } from "@babylonjs/core/PostProcesses/RenderPipeline/Pipelines/defaultRenderingPipeline";
-import { LensRenderingPipeline } from "@babylonjs/core/PostProcesses/RenderPipeline/Pipelines/lensRenderingPipeline";
 import { PostProcess } from "@babylonjs/core/PostProcesses/postProcess";
 import { FxaaPostProcess } from "@babylonjs/core/PostProcesses/fxaaPostProcess";
 import { SSRRenderingPipeline } from "@babylonjs/core/PostProcesses/RenderPipeline/Pipelines/ssrRenderingPipeline";
 import { VolumetricLightScatteringPostProcess } from "@babylonjs/core/PostProcesses/volumetricLightScatteringPostProcess";
 import { Texture } from "@babylonjs/core/Materials/Textures/texture";
 import { ShaderStore } from "@babylonjs/core/Engines/shaderStore";
-import { Vector3 } from "@babylonjs/core/Maths/math.vector";
+import { Vector2, Vector3 } from "@babylonjs/core/Maths/math.vector";
 import { Scene } from "@babylonjs/core/scene";
+
+const STANDALONE_BLOOM_SCALE = 0.5;
+
+function disposeStandaloneBloomEffect(host: any): void {
+    if (!host.standaloneBloomEffect) {
+        return;
+    }
+
+    host.standaloneBloomEffect.disposeEffects(host.camera);
+    host.standaloneBloomEffect = null;
+}
+
+function getStandaloneBloomPostProcesses(host: any): PostProcess[] {
+    return host.standaloneBloomEffect?._effects ?? [];
+}
+
+function disposeStandaloneLensBlurPostProcess(host: any): void {
+    if (!host.standaloneLensBlurPostProcess) {
+        return;
+    }
+
+    host.standaloneLensBlurPostProcess.dispose(host.camera);
+    host.standaloneLensBlurPostProcess = null;
+}
+
+function getStandaloneLensBlurPostProcesses(host: any): PostProcess[] {
+    return host.standaloneLensBlurPostProcess ? [host.standaloneLensBlurPostProcess] : [];
+}
+
+function disposeStandaloneEdgeBlurPostProcess(host: any): void {
+    if (!host.standaloneEdgeBlurPostProcess) {
+        return;
+    }
+
+    host.standaloneEdgeBlurPostProcess.dispose(host.camera);
+    host.standaloneEdgeBlurPostProcess = null;
+}
+
+function getStandaloneEdgeBlurPostProcesses(host: any): PostProcess[] {
+    return host.standaloneEdgeBlurPostProcess ? [host.standaloneEdgeBlurPostProcess] : [];
+}
+
+function ensureStandaloneEdgeBlurShader(): void {
+    const shaderKey = "mmdStandaloneEdgeBlurFragmentShader";
+    if (!Effect.ShadersStore[shaderKey]) {
+        Effect.ShadersStore[shaderKey] = `
+                precision highp float;
+                varying vec2 vUV;
+                uniform sampler2D textureSampler;
+                uniform vec2 texelSize;
+                uniform float edgeBlurStrength;
+                uniform float aspectRatio;
+
+                float computeEdgeMask(vec2 uv) {
+                    vec2 centered = (uv - vec2(0.5)) * vec2(aspectRatio, 1.0);
+                    float radius = length(centered);
+                    float mask = smoothstep(0.50, 0.96, radius);
+                    return mask * mask * (3.0 - 2.0 * mask);
+                }
+
+                float computeEdgeStrengthCurve(float strength) {
+                    float lifted = strength + 0.75 * strength * strength;
+                    return min(1.75, lifted);
+                }
+
+                vec4 sampleBlur(vec2 uv, vec2 stepRadius) {
+                    vec4 color = texture2D(textureSampler, uv) * 0.20;
+                    color += texture2D(textureSampler, clamp(uv + vec2(stepRadius.x, 0.0), vec2(0.001), vec2(0.999))) * 0.12;
+                    color += texture2D(textureSampler, clamp(uv - vec2(stepRadius.x, 0.0), vec2(0.001), vec2(0.999))) * 0.12;
+                    color += texture2D(textureSampler, clamp(uv + vec2(0.0, stepRadius.y), vec2(0.001), vec2(0.999))) * 0.12;
+                    color += texture2D(textureSampler, clamp(uv - vec2(0.0, stepRadius.y), vec2(0.001), vec2(0.999))) * 0.12;
+                    color += texture2D(textureSampler, clamp(uv + vec2(stepRadius.x, stepRadius.y), vec2(0.001), vec2(0.999))) * 0.08;
+                    color += texture2D(textureSampler, clamp(uv + vec2(-stepRadius.x, stepRadius.y), vec2(0.001), vec2(0.999))) * 0.08;
+                    color += texture2D(textureSampler, clamp(uv + vec2(stepRadius.x, -stepRadius.y), vec2(0.001), vec2(0.999))) * 0.08;
+                    color += texture2D(textureSampler, clamp(uv - vec2(stepRadius.x, stepRadius.y), vec2(0.001), vec2(0.999))) * 0.08;
+                    return color;
+                }
+
+                void main(void) {
+                    vec4 baseColor = texture2D(textureSampler, vUV);
+                    if (edgeBlurStrength <= 0.0001) {
+                        gl_FragColor = baseColor;
+                        return;
+                    }
+
+                    float edgeMask = computeEdgeMask(vUV);
+                    if (edgeMask <= 0.0001) {
+                        gl_FragColor = baseColor;
+                        return;
+                    }
+
+                    float curvedStrength = computeEdgeStrengthCurve(edgeBlurStrength);
+                    float blurPixels = (0.7 + 9.8 * curvedStrength) * (0.24 + 0.76 * edgeMask);
+                    vec2 stepRadius = texelSize * blurPixels;
+                    vec4 blurColor = sampleBlur(vUV, stepRadius);
+                    float blurMix = edgeMask * (0.28 + 0.72 * min(1.0, curvedStrength));
+                    gl_FragColor = mix(baseColor, blurColor, clamp(blurMix, 0.0, 1.0));
+                }
+            `;
+    }
+    if (!ShaderStore.ShadersStoreWGSL[shaderKey]) {
+        ShaderStore.ShadersStoreWGSL[shaderKey] = `
+                varying vUV: vec2f;
+                var textureSamplerSampler: sampler;
+                var textureSampler: texture_2d<f32>;
+                uniform texelSize: vec2f;
+                uniform edgeBlurStrength: f32;
+                uniform aspectRatio: f32;
+
+                fn computeEdgeMask(uv: vec2f) -> f32 {
+                    let centered: vec2f = (uv - vec2f(0.5, 0.5)) * vec2f(uniforms.aspectRatio, 1.0);
+                    let radius: f32 = length(centered);
+                    let mask: f32 = smoothstep(0.50, 0.96, radius);
+                    return mask * mask * (3.0 - 2.0 * mask);
+                }
+
+                fn computeEdgeStrengthCurve(strength: f32) -> f32 {
+                    let lifted: f32 = strength + 0.75 * strength * strength;
+                    return min(1.75, lifted);
+                }
+
+                fn sampleColor(uv: vec2f) -> vec4f {
+                    return textureSampleLevel(textureSampler, textureSamplerSampler, clamp(uv, vec2f(0.001, 0.001), vec2f(0.999, 0.999)), 0.0);
+                }
+
+                fn sampleBlur(uv: vec2f, stepRadius: vec2f) -> vec4f {
+                    var color: vec4f = sampleColor(uv) * 0.20;
+                    color += sampleColor(uv + vec2f(stepRadius.x, 0.0)) * 0.12;
+                    color += sampleColor(uv - vec2f(stepRadius.x, 0.0)) * 0.12;
+                    color += sampleColor(uv + vec2f(0.0, stepRadius.y)) * 0.12;
+                    color += sampleColor(uv - vec2f(0.0, stepRadius.y)) * 0.12;
+                    color += sampleColor(uv + vec2f(stepRadius.x, stepRadius.y)) * 0.08;
+                    color += sampleColor(uv + vec2f(-stepRadius.x, stepRadius.y)) * 0.08;
+                    color += sampleColor(uv + vec2f(stepRadius.x, -stepRadius.y)) * 0.08;
+                    color += sampleColor(uv - vec2f(stepRadius.x, stepRadius.y)) * 0.08;
+                    return color;
+                }
+
+                #define CUSTOM_FRAGMENT_DEFINITIONS
+                @fragment
+                fn main(input: FragmentInputs)->FragmentOutputs {
+                    let baseColor: vec4f = sampleColor(input.vUV);
+                    var finalColor: vec4f = baseColor;
+
+                    if (uniforms.edgeBlurStrength > 0.0001) {
+                        let edgeMask: f32 = computeEdgeMask(input.vUV);
+                        if (edgeMask > 0.0001) {
+                            let curvedStrength: f32 = computeEdgeStrengthCurve(uniforms.edgeBlurStrength);
+                            let blurPixels: f32 = (0.7 + 9.8 * curvedStrength) * (0.24 + 0.76 * edgeMask);
+                            let stepRadius: vec2f = uniforms.texelSize * blurPixels;
+                            let blurColor: vec4f = sampleBlur(input.vUV, stepRadius);
+                            let blurMix: f32 = clamp(edgeMask * (0.28 + 0.72 * min(1.0, curvedStrength)), 0.0, 1.0);
+                            finalColor = mix(baseColor, blurColor, blurMix);
+                        }
+                    }
+
+                    var fragmentOutputs: FragmentOutputs;
+                    fragmentOutputs.color = finalColor;
+                    return fragmentOutputs;
+                }
+            `;
+    }
+}
+
+function ensureStandaloneLensBlurShader(): void {
+    const shaderKey = "mmdStandaloneLensBlurFragmentShader";
+    if (!Effect.ShadersStore[shaderKey]) {
+        Effect.ShadersStore[shaderKey] = `
+                precision highp float;
+                varying vec2 vUV;
+                uniform sampler2D textureSampler;
+                uniform sampler2D depthSampler;
+                uniform vec2 texelSize;
+                uniform vec2 cameraNearFar;
+                uniform float dofEnabled;
+                uniform float blurStrength;
+                uniform float focusDistance;
+                uniform float cocPrecalculation;
+                uniform float highlightGain;
+                uniform float highlightThreshold;
+
+                float computePixelDistance(float depthMetric) {
+                    return mix(cameraNearFar.x, cameraNearFar.y, clamp(depthMetric, 0.0, 1.0)) * 1000.0;
+                }
+
+                float computeCoC(float depthMetric) {
+                    float pixelDistance = max(1.0, computePixelDistance(depthMetric));
+                    float coc = abs(cocPrecalculation * ((focusDistance - pixelDistance) / pixelDistance));
+                    return clamp(coc, 0.0, 1.0);
+                }
+
+                float computeCocMask(float coc) {
+                    float mask = smoothstep(0.04, 0.96, coc);
+                    return mask * mask * (3.0 - 2.0 * mask);
+                }
+
+                float computeHighlightMask(vec3 color) {
+                    float luminance = dot(color, vec3(0.2125, 0.7154, 0.0721));
+                    float luminanceThreshold = highlightThreshold > 1.0
+                        ? 0.92 + 0.015 * (highlightThreshold - 1.0)
+                        : 0.42 + 0.38 * highlightThreshold;
+                    float knee = max(0.05, (1.0 - clamp(luminanceThreshold, 0.0, 0.995)) * 0.9);
+                    float softMask = smoothstep(
+                        max(0.0, luminanceThreshold - knee),
+                        min(1.0, luminanceThreshold + knee * 3.6),
+                        luminance
+                    );
+                    return softMask * (0.18 + 0.82 * softMask);
+                }
+
+                float computeSilhouetteSuppression(vec2 uv, float currentDistance) {
+                    float nearestDistance = currentDistance;
+                    vec2 offsetX = vec2(texelSize.x * 1.5, 0.0);
+                    vec2 offsetY = vec2(0.0, texelSize.y * 1.5);
+
+                    nearestDistance = min(nearestDistance, computePixelDistance(texture2D(depthSampler, clamp(uv + offsetX, vec2(0.001), vec2(0.999))).r));
+                    nearestDistance = min(nearestDistance, computePixelDistance(texture2D(depthSampler, clamp(uv - offsetX, vec2(0.001), vec2(0.999))).r));
+                    nearestDistance = min(nearestDistance, computePixelDistance(texture2D(depthSampler, clamp(uv + offsetY, vec2(0.001), vec2(0.999))).r));
+                    nearestDistance = min(nearestDistance, computePixelDistance(texture2D(depthSampler, clamp(uv - offsetY, vec2(0.001), vec2(0.999))).r));
+
+                    float foregroundDelta = max(0.0, currentDistance - nearestDistance);
+                    return 1.0 - smoothstep(120.0, 1200.0, foregroundDelta);
+                }
+
+                float hash12(vec2 p) {
+                    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
+                }
+
+                vec2 rotateDirection(vec2 dir, float angle) {
+                    float s = sin(angle);
+                    float c = cos(angle);
+                    return vec2(dir.x * c - dir.y * s, dir.x * s + dir.y * c);
+                }
+
+                float computeBackgroundBleedSuppression(float currentDistance, float sampleDistance) {
+                    float backgroundDelta = max(0.0, sampleDistance - currentDistance);
+                    float keep = 1.0 - smoothstep(40.0, 360.0, backgroundDelta);
+                    return 0.18 + 0.82 * keep;
+                }
+
+                float computeEdgeBlendBackAmount(float silhouetteSuppression) {
+                    float edgePresence = 1.0 - silhouetteSuppression;
+                    float edgeBlend = smoothstep(0.08, 0.55, edgePresence);
+                    return edgeBlend * (0.55 + 0.2 * blurStrength);
+                }
+
+                vec3 samplePrefilteredColor(vec2 uv) {
+                    vec2 prefilterStep = texelSize * (0.7 + 0.9 * blurStrength);
+                    vec3 color = texture2D(textureSampler, uv).rgb * 0.28;
+                    color += texture2D(textureSampler, clamp(uv + vec2(prefilterStep.x, 0.0), vec2(0.001), vec2(0.999))).rgb * 0.18;
+                    color += texture2D(textureSampler, clamp(uv - vec2(prefilterStep.x, 0.0), vec2(0.001), vec2(0.999))).rgb * 0.18;
+                    color += texture2D(textureSampler, clamp(uv + vec2(0.0, prefilterStep.y), vec2(0.001), vec2(0.999))).rgb * 0.18;
+                    color += texture2D(textureSampler, clamp(uv - vec2(0.0, prefilterStep.y), vec2(0.001), vec2(0.999))).rgb * 0.18;
+                    return color;
+                }
+
+                vec3 accumulateBokeh(vec2 uv, float currentDistance, float currentCoc, float currentMask) {
+                    const int DIR_COUNT = 16;
+                    vec2 dirs[DIR_COUNT];
+                    dirs[0] = vec2(1.0, 0.0);
+                    dirs[1] = vec2(0.9239, 0.3827);
+                    dirs[2] = vec2(0.7071, 0.7071);
+                    dirs[3] = vec2(0.3827, 0.9239);
+                    dirs[4] = vec2(0.0, 1.0);
+                    dirs[5] = vec2(-0.3827, 0.9239);
+                    dirs[6] = vec2(-0.7071, 0.7071);
+                    dirs[7] = vec2(-0.9239, 0.3827);
+                    dirs[8] = vec2(-1.0, 0.0);
+                    dirs[9] = vec2(-0.9239, -0.3827);
+                    dirs[10] = vec2(-0.7071, -0.7071);
+                    dirs[11] = vec2(-0.3827, -0.9239);
+                    dirs[12] = vec2(0.0, -1.0);
+                    dirs[13] = vec2(0.3827, -0.9239);
+                    dirs[14] = vec2(0.7071, -0.7071);
+                    dirs[15] = vec2(0.9239, -0.3827);
+
+                    float ringScale[3];
+                    ringScale[0] = 0.65;
+                    ringScale[1] = 1.25;
+                    ringScale[2] = 1.95;
+
+                    float ringWeight[3];
+                    ringWeight[0] = 0.055;
+                    ringWeight[1] = 0.040;
+                    ringWeight[2] = 0.030;
+
+                    float radiusPixels = (1.2 + 10.5 * blurStrength) * currentCoc;
+                    vec2 baseRadius = texelSize * radiusPixels;
+                    vec3 accumulated = vec3(0.0);
+                    float totalWeight = 0.0001;
+
+                    for (int ring = 0; ring < 3; ++ring) {
+                        float ringAngle = hash12(uv * vec2(173.0, 241.0) + vec2(float(ring) * 13.1, currentCoc * 29.7)) * 6.2831853;
+                        float radiusJitter = 0.9 + 0.2 * hash12(uv * vec2(311.0, 157.0) + vec2(float(ring) * 17.3, currentCoc * 11.9));
+                        vec2 radius = baseRadius * ringScale[ring] * radiusJitter;
+                        float baseWeight = ringWeight[ring];
+
+                        for (int i = 0; i < DIR_COUNT; ++i) {
+                            float sampleAngleJitter = (hash12(uv * vec2(421.0, 197.0) + vec2(float(ring) * 19.1, float(i) * 7.7 + currentCoc * 23.0)) - 0.5) * 0.22;
+                            float sampleRadiusJitter = 0.92 + 0.16 * hash12(uv * vec2(263.0, 379.0) + vec2(float(ring) * 11.3, float(i) * 5.9 + currentCoc * 17.0));
+                            vec2 rotatedDir = rotateDirection(dirs[i], ringAngle + sampleAngleJitter);
+                            vec2 tangentDir = vec2(-rotatedDir.y, rotatedDir.x);
+                            vec2 sampleOffset = rotatedDir * radius * sampleRadiusJitter;
+                            sampleOffset += tangentDir * texelSize * (0.18 + 0.35 * blurStrength) * (sampleRadiusJitter - 1.0);
+                            vec2 sampleUv = clamp(uv + sampleOffset, vec2(0.001), vec2(0.999));
+                            float sampleDepth = texture2D(depthSampler, sampleUv).r;
+                            float sampleDistance = computePixelDistance(sampleDepth);
+                            float sampleCoc = computeCoC(sampleDepth);
+                            float sampleMask = computeCocMask(sampleCoc);
+                            vec3 sampleColor = samplePrefilteredColor(sampleUv);
+                            float sampleHighlight = computeHighlightMask(sampleColor);
+                            float depthSuppression = computeBackgroundBleedSuppression(currentDistance, sampleDistance);
+                            float sampleWeight = baseWeight * sampleHighlight * sampleCoc * sampleMask * currentMask * depthSuppression;
+                            accumulated += sampleColor * sampleWeight;
+                            totalWeight += sampleWeight;
+                        }
+                    }
+
+                    return accumulated / totalWeight;
+                }
+
+                vec3 smoothBokeh(vec2 uv, float currentDistance, float currentCoc, float currentMask, vec3 centerBokeh) {
+                    vec2 softRadius = texelSize * (1.15 + 5.0 * blurStrength) * max(0.62, currentCoc);
+                    vec2 diagRadius = softRadius * 0.78;
+                    vec3 smoothed = centerBokeh * 0.16;
+                    smoothed += accumulateBokeh(clamp(uv + vec2(softRadius.x, 0.0), vec2(0.001), vec2(0.999)), currentDistance, currentCoc, currentMask) * 0.14;
+                    smoothed += accumulateBokeh(clamp(uv - vec2(softRadius.x, 0.0), vec2(0.001), vec2(0.999)), currentDistance, currentCoc, currentMask) * 0.14;
+                    smoothed += accumulateBokeh(clamp(uv + vec2(0.0, softRadius.y), vec2(0.001), vec2(0.999)), currentDistance, currentCoc, currentMask) * 0.14;
+                    smoothed += accumulateBokeh(clamp(uv - vec2(0.0, softRadius.y), vec2(0.001), vec2(0.999)), currentDistance, currentCoc, currentMask) * 0.14;
+                    smoothed += accumulateBokeh(clamp(uv + vec2(diagRadius.x, diagRadius.y), vec2(0.001), vec2(0.999)), currentDistance, currentCoc, currentMask) * 0.07;
+                    smoothed += accumulateBokeh(clamp(uv + vec2(-diagRadius.x, diagRadius.y), vec2(0.001), vec2(0.999)), currentDistance, currentCoc, currentMask) * 0.07;
+                    smoothed += accumulateBokeh(clamp(uv + vec2(diagRadius.x, -diagRadius.y), vec2(0.001), vec2(0.999)), currentDistance, currentCoc, currentMask) * 0.07;
+                    smoothed += accumulateBokeh(clamp(uv - vec2(diagRadius.x, diagRadius.y), vec2(0.001), vec2(0.999)), currentDistance, currentCoc, currentMask) * 0.07;
+                    return smoothed;
+                }
+
+                void main(void) {
+                    vec4 baseColor = texture2D(textureSampler, vUV);
+                    if (dofEnabled <= 0.5 || blurStrength <= 0.0001) {
+                        gl_FragColor = baseColor;
+                        return;
+                    }
+
+                    float depthMetric = clamp(texture2D(depthSampler, clamp(vUV, vec2(0.001), vec2(0.999))).r, 0.0, 1.0);
+                    float currentDistance = computePixelDistance(depthMetric);
+                    float coc = computeCoC(depthMetric);
+                    float cocMask = computeCocMask(coc);
+                    float silhouetteSuppression = computeSilhouetteSuppression(vUV, currentDistance);
+                    cocMask *= silhouetteSuppression;
+                    if (cocMask <= 0.0001) {
+                        gl_FragColor = baseColor;
+                        return;
+                    }
+
+                    vec3 bokeh = smoothBokeh(vUV, currentDistance, coc, cocMask, accumulateBokeh(vUV, currentDistance, coc, cocMask));
+                    float addScale = highlightGain * (0.008 + 0.014 * blurStrength) * cocMask;
+                    vec3 finalRgb = baseColor.rgb + bokeh * addScale;
+                    float edgeBlendBack = computeEdgeBlendBackAmount(silhouetteSuppression);
+                    finalRgb = mix(finalRgb, baseColor.rgb, clamp(edgeBlendBack, 0.0, 0.9));
+                    gl_FragColor = vec4(finalRgb, baseColor.a);
+                }
+            `;
+    }
+    if (!ShaderStore.ShadersStoreWGSL[shaderKey]) {
+        ShaderStore.ShadersStoreWGSL[shaderKey] = `
+                varying vUV: vec2f;
+                var textureSamplerSampler: sampler;
+                var textureSampler: texture_2d<f32>;
+                var depthSamplerSampler: sampler;
+                var depthSampler: texture_2d<f32>;
+                uniform texelSize: vec2f;
+                uniform cameraNearFar: vec2f;
+                uniform dofEnabled: f32;
+                uniform blurStrength: f32;
+                uniform focusDistance: f32;
+                uniform cocPrecalculation: f32;
+                uniform highlightGain: f32;
+                uniform highlightThreshold: f32;
+
+                fn computePixelDistance(depthMetric: f32) -> f32 {
+                    return mix(uniforms.cameraNearFar.x, uniforms.cameraNearFar.y, clamp(depthMetric, 0.0, 1.0)) * 1000.0;
+                }
+
+                fn computeCoC(depthMetric: f32) -> f32 {
+                    let pixelDistance = max(1.0, computePixelDistance(depthMetric));
+                    let coc = abs(uniforms.cocPrecalculation * ((uniforms.focusDistance - pixelDistance) / pixelDistance));
+                    return clamp(coc, 0.0, 1.0);
+                }
+
+                fn computeCocMask(coc: f32) -> f32 {
+                    let mask = smoothstep(0.04, 0.96, coc);
+                    return mask * mask * (3.0 - 2.0 * mask);
+                }
+
+                fn computeHighlightMask(color: vec3f) -> f32 {
+                    let luminance = dot(color, vec3f(0.2125, 0.7154, 0.0721));
+                    var luminanceThreshold = 0.42 + 0.38 * uniforms.highlightThreshold;
+                    if (uniforms.highlightThreshold > 1.0) {
+                        luminanceThreshold = 0.92 + 0.015 * (uniforms.highlightThreshold - 1.0);
+                    }
+                    let knee = max(0.05, (1.0 - clamp(luminanceThreshold, 0.0, 0.995)) * 0.9);
+                    let softMask = smoothstep(
+                        max(0.0, luminanceThreshold - knee),
+                        min(1.0, luminanceThreshold + knee * 3.6),
+                        luminance,
+                    );
+                    return softMask * (0.18 + 0.82 * softMask);
+                }
+
+                fn computeSilhouetteSuppression(uv: vec2f, currentDistance: f32) -> f32 {
+                    var nearestDistance = currentDistance;
+                    let offsetX = vec2f(uniforms.texelSize.x * 1.5, 0.0);
+                    let offsetY = vec2f(0.0, uniforms.texelSize.y * 1.5);
+
+                    nearestDistance = min(nearestDistance, computePixelDistance(textureSampleLevel(depthSampler, depthSamplerSampler, clamp(uv + offsetX, vec2f(0.001), vec2f(0.999)), 0.0).r));
+                    nearestDistance = min(nearestDistance, computePixelDistance(textureSampleLevel(depthSampler, depthSamplerSampler, clamp(uv - offsetX, vec2f(0.001), vec2f(0.999)), 0.0).r));
+                    nearestDistance = min(nearestDistance, computePixelDistance(textureSampleLevel(depthSampler, depthSamplerSampler, clamp(uv + offsetY, vec2f(0.001), vec2f(0.999)), 0.0).r));
+                    nearestDistance = min(nearestDistance, computePixelDistance(textureSampleLevel(depthSampler, depthSamplerSampler, clamp(uv - offsetY, vec2f(0.001), vec2f(0.999)), 0.0).r));
+
+                    let foregroundDelta = max(0.0, currentDistance - nearestDistance);
+                    return 1.0 - smoothstep(120.0, 1200.0, foregroundDelta);
+                }
+
+                fn hash12(p: vec2f) -> f32 {
+                    return fract(sin(dot(p, vec2f(127.1, 311.7))) * 43758.5453123);
+                }
+
+                fn rotateDirection(dir: vec2f, angle: f32) -> vec2f {
+                    let s = sin(angle);
+                    let c = cos(angle);
+                    return vec2f(dir.x * c - dir.y * s, dir.x * s + dir.y * c);
+                }
+
+                fn computeBackgroundBleedSuppression(currentDistance: f32, sampleDistance: f32) -> f32 {
+                    let backgroundDelta = max(0.0, sampleDistance - currentDistance);
+                    let keep = 1.0 - smoothstep(40.0, 360.0, backgroundDelta);
+                    return 0.18 + 0.82 * keep;
+                }
+
+                fn computeEdgeBlendBackAmount(silhouetteSuppression: f32) -> f32 {
+                    let edgePresence = 1.0 - silhouetteSuppression;
+                    let edgeBlend = smoothstep(0.08, 0.55, edgePresence);
+                    return edgeBlend * (0.55 + 0.2 * uniforms.blurStrength);
+                }
+
+                fn samplePrefilteredColor(uv: vec2f) -> vec3f {
+                    let prefilterStep = uniforms.texelSize * (0.7 + 0.9 * uniforms.blurStrength);
+                    var color = textureSampleLevel(textureSampler, textureSamplerSampler, uv, 0.0).rgb * 0.28;
+                    color = color + textureSampleLevel(textureSampler, textureSamplerSampler, clamp(uv + vec2f(prefilterStep.x, 0.0), vec2f(0.001), vec2f(0.999)), 0.0).rgb * 0.18;
+                    color = color + textureSampleLevel(textureSampler, textureSamplerSampler, clamp(uv - vec2f(prefilterStep.x, 0.0), vec2f(0.001), vec2f(0.999)), 0.0).rgb * 0.18;
+                    color = color + textureSampleLevel(textureSampler, textureSamplerSampler, clamp(uv + vec2f(0.0, prefilterStep.y), vec2f(0.001), vec2f(0.999)), 0.0).rgb * 0.18;
+                    color = color + textureSampleLevel(textureSampler, textureSamplerSampler, clamp(uv - vec2f(0.0, prefilterStep.y), vec2f(0.001), vec2f(0.999)), 0.0).rgb * 0.18;
+                    return color;
+                }
+
+                fn directionForIndex(index: i32) -> vec2f {
+                    switch index {
+                        case 0: { return vec2f(1.0, 0.0); }
+                        case 1: { return vec2f(0.9239, 0.3827); }
+                        case 2: { return vec2f(0.7071, 0.7071); }
+                        case 3: { return vec2f(0.3827, 0.9239); }
+                        case 4: { return vec2f(0.0, 1.0); }
+                        case 5: { return vec2f(-0.3827, 0.9239); }
+                        case 6: { return vec2f(-0.7071, 0.7071); }
+                        case 7: { return vec2f(-0.9239, 0.3827); }
+                        case 8: { return vec2f(-1.0, 0.0); }
+                        case 9: { return vec2f(-0.9239, -0.3827); }
+                        case 10: { return vec2f(-0.7071, -0.7071); }
+                        case 11: { return vec2f(-0.3827, -0.9239); }
+                        case 12: { return vec2f(0.0, -1.0); }
+                        case 13: { return vec2f(0.3827, -0.9239); }
+                        case 14: { return vec2f(0.7071, -0.7071); }
+                        default: { return vec2f(0.9239, -0.3827); }
+                    }
+                }
+
+                fn ringScaleForIndex(index: i32) -> f32 {
+                    switch index {
+                        case 0: { return 0.65; }
+                        case 1: { return 1.25; }
+                        default: { return 1.95; }
+                    }
+                }
+
+                fn ringWeightForIndex(index: i32) -> f32 {
+                    switch index {
+                        case 0: { return 0.055; }
+                        case 1: { return 0.040; }
+                        default: { return 0.030; }
+                    }
+                }
+
+                fn accumulateBokeh(uv: vec2f, currentDistance: f32, currentCoc: f32, currentMask: f32) -> vec3f {
+                    let radiusPixels = (1.2 + 10.5 * uniforms.blurStrength) * currentCoc;
+                    let baseRadius = uniforms.texelSize * radiusPixels;
+                    var accumulated = vec3f(0.0);
+                    var totalWeight = 0.0001;
+
+                    for (var ring: i32 = 0; ring < 3; ring = ring + 1) {
+                        let ringAngle = hash12(uv * vec2f(173.0, 241.0) + vec2f(f32(ring) * 13.1, currentCoc * 29.7)) * 6.2831853;
+                        let radiusJitter = 0.9 + 0.2 * hash12(uv * vec2f(311.0, 157.0) + vec2f(f32(ring) * 17.3, currentCoc * 11.9));
+                        let radius = baseRadius * ringScaleForIndex(ring) * radiusJitter;
+                        let baseWeight = ringWeightForIndex(ring);
+
+                        for (var i: i32 = 0; i < 16; i = i + 1) {
+                            let sampleAngleJitter = (hash12(uv * vec2f(421.0, 197.0) + vec2f(f32(ring) * 19.1, f32(i) * 7.7 + currentCoc * 23.0)) - 0.5) * 0.22;
+                            let sampleRadiusJitter = 0.92 + 0.16 * hash12(uv * vec2f(263.0, 379.0) + vec2f(f32(ring) * 11.3, f32(i) * 5.9 + currentCoc * 17.0));
+                            let dir = rotateDirection(directionForIndex(i), ringAngle + sampleAngleJitter);
+                            let tangentDir = vec2f(-dir.y, dir.x);
+                            var sampleOffset = dir * radius * sampleRadiusJitter;
+                            sampleOffset = sampleOffset + tangentDir * uniforms.texelSize * (0.18 + 0.35 * uniforms.blurStrength) * (sampleRadiusJitter - 1.0);
+                            let sampleUv = clamp(uv + sampleOffset, vec2f(0.001), vec2f(0.999));
+                            let sampleDepth = textureSampleLevel(depthSampler, depthSamplerSampler, sampleUv, 0.0).r;
+                            let sampleDistance = computePixelDistance(sampleDepth);
+                            let sampleCoc = computeCoC(sampleDepth);
+                            let sampleMask = computeCocMask(sampleCoc);
+                            let sampleColor = samplePrefilteredColor(sampleUv);
+                            let sampleHighlight = computeHighlightMask(sampleColor);
+                            let depthSuppression = computeBackgroundBleedSuppression(currentDistance, sampleDistance);
+                            let sampleWeight = baseWeight * sampleHighlight * sampleCoc * sampleMask * currentMask * depthSuppression;
+                            accumulated = accumulated + sampleColor * sampleWeight;
+                            totalWeight = totalWeight + sampleWeight;
+                        }
+                    }
+
+                    return accumulated / totalWeight;
+                }
+
+                fn smoothBokeh(uv: vec2f, currentDistance: f32, currentCoc: f32, currentMask: f32, centerBokeh: vec3f) -> vec3f {
+                    let softRadius = uniforms.texelSize * (1.15 + 5.0 * uniforms.blurStrength) * max(0.62, currentCoc);
+                    let diagRadius = softRadius * 0.78;
+                    var smoothed = centerBokeh * 0.16;
+                    smoothed = smoothed + accumulateBokeh(clamp(uv + vec2f(softRadius.x, 0.0), vec2f(0.001), vec2f(0.999)), currentDistance, currentCoc, currentMask) * 0.14;
+                    smoothed = smoothed + accumulateBokeh(clamp(uv - vec2f(softRadius.x, 0.0), vec2f(0.001), vec2f(0.999)), currentDistance, currentCoc, currentMask) * 0.14;
+                    smoothed = smoothed + accumulateBokeh(clamp(uv + vec2f(0.0, softRadius.y), vec2f(0.001), vec2f(0.999)), currentDistance, currentCoc, currentMask) * 0.14;
+                    smoothed = smoothed + accumulateBokeh(clamp(uv - vec2f(0.0, softRadius.y), vec2f(0.001), vec2f(0.999)), currentDistance, currentCoc, currentMask) * 0.14;
+                    smoothed = smoothed + accumulateBokeh(clamp(uv + vec2f(diagRadius.x, diagRadius.y), vec2f(0.001), vec2f(0.999)), currentDistance, currentCoc, currentMask) * 0.07;
+                    smoothed = smoothed + accumulateBokeh(clamp(uv + vec2f(-diagRadius.x, diagRadius.y), vec2f(0.001), vec2f(0.999)), currentDistance, currentCoc, currentMask) * 0.07;
+                    smoothed = smoothed + accumulateBokeh(clamp(uv + vec2f(diagRadius.x, -diagRadius.y), vec2f(0.001), vec2f(0.999)), currentDistance, currentCoc, currentMask) * 0.07;
+                    smoothed = smoothed + accumulateBokeh(clamp(uv - vec2f(diagRadius.x, diagRadius.y), vec2f(0.001), vec2f(0.999)), currentDistance, currentCoc, currentMask) * 0.07;
+                    return smoothed;
+                }
+
+                #define CUSTOM_FRAGMENT_DEFINITIONS
+                @fragment
+                fn main(input: FragmentInputs)->FragmentOutputs {
+                    let baseColor = textureSample(textureSampler, textureSamplerSampler, input.vUV);
+                    var finalColor = baseColor;
+
+                    if (uniforms.dofEnabled > 0.5 && uniforms.blurStrength > 0.0001) {
+                        let depthMetric = clamp(
+                            textureSampleLevel(depthSampler, depthSamplerSampler, clamp(input.vUV, vec2f(0.001), vec2f(0.999)), 0.0).r,
+                            0.0,
+                            1.0,
+                        );
+                        let currentDistance = computePixelDistance(depthMetric);
+                        let coc = computeCoC(depthMetric);
+                        var cocMask = computeCocMask(coc);
+                        let silhouetteSuppression = computeSilhouetteSuppression(input.vUV, currentDistance);
+                        cocMask = cocMask * silhouetteSuppression;
+
+                        if (cocMask > 0.0001) {
+                            let bokeh = smoothBokeh(input.vUV, currentDistance, coc, cocMask, accumulateBokeh(input.vUV, currentDistance, coc, cocMask));
+                            let addScale = uniforms.highlightGain * (0.008 + 0.014 * uniforms.blurStrength) * cocMask;
+                            var finalRgb = baseColor.rgb + bokeh * addScale;
+                            let edgeBlendBack = computeEdgeBlendBackAmount(silhouetteSuppression);
+                            finalRgb = mix(finalRgb, baseColor.rgb, clamp(edgeBlendBack, 0.0, 0.9));
+                            finalColor = vec4f(finalRgb, baseColor.a);
+                        }
+                    }
+
+                    fragmentOutputs.color = finalColor;
+                }
+            `;
+    }
+}
+
+function applyStandaloneBloomSettings(host: any): void {
+    const pipeline = host.defaultRenderingPipeline as DefaultRenderingPipeline | null;
+    if (pipeline) {
+        pipeline.bloomEnabled = false;
+    }
+
+    if (!host.postEffectBloomEnabledValue || !pipeline) {
+        disposeStandaloneBloomEffect(host);
+        host.enforceFinalPostProcessOrder();
+        return;
+    }
+
+    if (!host.standaloneBloomEffect) {
+        host.standaloneBloomEffect = new BloomEffect(
+            host.scene,
+            STANDALONE_BLOOM_SCALE,
+            host.postEffectBloomWeightValue,
+            host.postEffectBloomKernelValue,
+        );
+    }
+
+    host.standaloneBloomEffect.weight = host.postEffectBloomWeightValue;
+    host.standaloneBloomEffect.threshold = host.postEffectBloomThresholdValue;
+    host.standaloneBloomEffect.kernel = host.postEffectBloomKernelValue;
+    host.enforceFinalPostProcessOrder();
+}
 
 export function updateSimpleMotionBlurState(host: any, deltaMs: number): void {
     if (!host.motionBlurPostProcess || !host.postEffectMotionBlurEnabledValue) {
@@ -465,9 +1068,14 @@ export function applyAntialiasSettings(host: any): void {
 
 export function enforceFinalPostProcessOrder(host: any): void {
     const tail: PostProcess[] = [];
-    if (host.volumetricLightPostProcess) tail.push(host.volumetricLightPostProcess);
     if (host.originFogPostProcess) tail.push(host.originFogPostProcess);
+    // Keep fog before the additive light tail so distant haze is established
+    // before bloom / light scattering are layered on top of the image.
+    tail.push(...getStandaloneBloomPostProcesses(host));
+    tail.push(...getStandaloneLensBlurPostProcesses(host));
+    if (host.volumetricLightPostProcess) tail.push(host.volumetricLightPostProcess);
     if (host.motionBlurPostProcess) tail.push(host.motionBlurPostProcess);
+    tail.push(...getStandaloneEdgeBlurPostProcesses(host));
     if (host.finalLensDistortionPostProcess) tail.push(host.finalLensDistortionPostProcess);
     if (host.finalAntialiasPostProcess) tail.push(host.finalAntialiasPostProcess);
 
@@ -504,6 +1112,9 @@ export function setupEditorDofPipeline(host: any): void {
         host.motionBlurPostProcess.dispose(host.camera);
         host.motionBlurPostProcess = null;
     }
+    disposeStandaloneBloomEffect(host);
+    disposeStandaloneLensBlurPostProcess(host);
+    disposeStandaloneEdgeBlurPostProcess(host);
     if (host.volumetricLightPostProcess) {
         host.volumetricLightPostProcess.dispose(host.camera);
         host.volumetricLightPostProcess = null;
@@ -679,23 +1290,22 @@ export function getOrCreateExternalLutBlobUrl(host: any): string {
 export function applyDefaultPipelinePostProcessSettings(host: any): void {
     const pipeline = host.defaultRenderingPipeline;
     if (!pipeline) {
+        disposeStandaloneBloomEffect(host);
         return;
     }
 
-    pipeline.bloomEnabled = host.postEffectBloomEnabledValue;
-    pipeline.bloomWeight = host.postEffectBloomWeightValue;
-    pipeline.bloomThreshold = host.postEffectBloomThresholdValue;
-    pipeline.bloomKernel = host.postEffectBloomKernelValue;
+    applyStandaloneBloomSettings(host);
 
-    pipeline.glowLayerEnabled = host.postEffectGlowEnabledValue;
-    if (pipeline.glowLayer) {
-        pipeline.glowLayer.intensity = host.postEffectGlowIntensityValue;
-        pipeline.glowLayer.blurKernelSize = host.postEffectGlowKernelValue;
-    }
+    pipeline.glowLayerEnabled = false;
 
     pipeline.chromaticAberrationEnabled = host.postEffectChromaticAberrationValue > 1e-4;
     if (pipeline.chromaticAberration) {
         pipeline.chromaticAberration.aberrationAmount = host.postEffectChromaticAberrationValue;
+        pipeline.chromaticAberration.radialIntensity = 2.2;
+        pipeline.chromaticAberration.direction = new Vector2(0, 0);
+        pipeline.chromaticAberration.centerPosition = new Vector2(0.5, 0.5);
+        pipeline.chromaticAberration.screenWidth = host.engine.getRenderWidth();
+        pipeline.chromaticAberration.screenHeight = host.engine.getRenderHeight();
     }
 
     pipeline.grainEnabled = host.postEffectGrainIntensityValue > 1e-4;
@@ -797,30 +1407,86 @@ export function applyEditorDofSettings(host: any): void {
 }
 
 export function applyDofLensBlurSettings(host: any): void {
-    if (!host.lensRenderingPipeline) return;
-    applyDofLensOpticsSettings(host);
-    const strength = host.dofLensBlurStrengthValue;
-    const enabled = host.dofEnabledValue && strength > 0.0001;
+    const isEnabled = Boolean(
+        host.defaultRenderingPipeline
+        && host.depthRenderer
+        && host.dofEnabledValue
+        && host.dofLensBlurEnabledValue
+        && host.dofLensBlurStrengthValue > 0.0001,
+    );
 
-    if (!enabled) {
-        host.lensRenderingPipeline.setHighlightsGain(0);
-        host.lensRenderingPipeline.setFocusDistance(-1);
+    if (!isEnabled) {
+        disposeStandaloneLensBlurPostProcess(host);
+        if (host.lensRenderingPipeline) {
+            host.lensRenderingPipeline.dispose(false);
+            host.lensRenderingPipeline = null;
+        }
+        host.enforceFinalPostProcessOrder();
         return;
     }
 
-    const focusDistance = Math.max(0.1, host.dofFocusDistanceMmValue / 1000);
-    const boostedStrength = Math.pow(strength, 0.58);
-    const highlightsGain = host.dofLensHighlightsBaseGain + boostedStrength * host.dofLensHighlightsGainRange;
-    const highlightsThreshold = Math.max(
-        0.08,
-        host.dofLensHighlightsBaseThreshold - boostedStrength * host.dofLensHighlightsThresholdRange
-    );
+    ensureStandaloneLensBlurShader();
 
-    const aperture = Math.max(0.45, 0.7 + boostedStrength * 1.35);
-    host.lensRenderingPipeline.setFocusDistance(focusDistance);
-    host.lensRenderingPipeline.setAperture(aperture);
-    host.lensRenderingPipeline.setHighlightsGain(highlightsGain);
-    host.lensRenderingPipeline.setHighlightsThreshold(highlightsThreshold);
+    if (!host.standaloneLensBlurPostProcess) {
+        host.standaloneLensBlurPostProcess = new PostProcess(
+            "standaloneLensBlur",
+            "mmdStandaloneLensBlur",
+            {
+                uniforms: [
+                    "texelSize",
+                    "cameraNearFar",
+                    "dofEnabled",
+                    "blurStrength",
+                    "focusDistance",
+                    "cocPrecalculation",
+                    "highlightGain",
+                    "highlightThreshold",
+                ],
+                samplers: ["depthSampler"],
+                size: 1.0,
+                camera: host.camera,
+                samplingMode: Texture.BILINEAR_SAMPLINGMODE,
+                engine: host.engine,
+                reusable: false,
+                shaderLanguage: host.getPostProcessShaderLanguage(),
+            },
+        );
+        host.standaloneLensBlurPostProcess.onApplyObservable.add((effect: any) => {
+            const depthMap = host.depthRenderer?.getDepthMap();
+            if (!depthMap) {
+                return;
+            }
+
+            const focusDistance = Math.max(1, host.dofFocusDistanceMmValue);
+            const focalLength = Math.max(1, host.dofFocalLengthValue);
+            const aperture = Math.max(0.001, host.dofLensSizeValue) / Math.max(0.01, host.dofEffectiveFStopValue);
+            const cocPrecalculation = (aperture * focalLength) / Math.max(1.0, focusDistance - focalLength);
+            const rawStrength = Math.max(0, Math.min(1, host.dofLensBlurStrengthValue));
+            const strength = Math.pow(rawStrength, 0.72);
+            const highlightGain = host.dofLensHighlightsBaseGain + strength * host.dofLensHighlightsGainRange;
+            const highlightThreshold = host.dofLensHighlightsBaseThreshold + (1 - strength) * host.dofLensHighlightsThresholdRange;
+
+            effect.setTexture("depthSampler", depthMap);
+            effect.setFloat2(
+                "texelSize",
+                1 / Math.max(1, host.standaloneLensBlurPostProcess?.width ?? host.engine.getRenderWidth()),
+                1 / Math.max(1, host.standaloneLensBlurPostProcess?.height ?? host.engine.getRenderHeight()),
+            );
+            effect.setFloat2("cameraNearFar", host.camera.minZ, host.camera.maxZ);
+            effect.setFloat("dofEnabled", host.dofEnabledValue ? 1 : 0);
+            effect.setFloat("blurStrength", strength);
+            effect.setFloat("focusDistance", focusDistance);
+            effect.setFloat("cocPrecalculation", cocPrecalculation);
+            effect.setFloat("highlightGain", highlightGain);
+            effect.setFloat("highlightThreshold", highlightThreshold);
+        });
+    }
+
+    if (host.lensRenderingPipeline) {
+        host.lensRenderingPipeline.dispose(false);
+        host.lensRenderingPipeline = null;
+    }
+    host.enforceFinalPostProcessOrder();
 }
 
 export function updateEditorDofFocusAndFStop(host: any): void {
@@ -831,7 +1497,7 @@ export function updateEditorDofFocusAndFStop(host: any): void {
         updateDofLensDistortionFromCameraFov(host);
     }
     if (host.dofAutoFocusToCameraTarget) {
-        const targetFocusMm = host.getCameraFocusDistanceMm();
+        const targetFocusMm = host.getDofAutoFocusDistanceMm();
         const minFocusMm = host.camera.minZ * 1000;
         host.dofFocusDistanceMmValue = Math.max(minFocusMm, targetFocusMm - host.dofAutoFocusNearOffsetMmValue);
     }
@@ -926,7 +1592,12 @@ export function computeAutoFocusMinFStop(host: any, focusDistanceMm: number): nu
 }
 
 export function configureDofDepthRenderer(host: any): void {
-    const depthRenderer = host.scene.enableDepthRenderer(host.camera, false);
+    const depthRenderer = host.scene.enableDepthRenderer(
+        host.camera,
+        false,
+        false,
+        Texture.NEAREST_SAMPLINGMODE,
+    );
     depthRenderer.useOnlyInActiveCamera = true;
     depthRenderer.forceDepthWriteTransparentMeshes = true;
     host.depthRenderer = depthRenderer;
@@ -1159,31 +1830,58 @@ export function setupFarDofPostProcess(host: any): void {
             1 / Math.max(1, host.dofPostProcess?.width ?? host.engine.getRenderWidth()),
             1 / Math.max(1, host.dofPostProcess?.height ?? host.engine.getRenderHeight())
         );
-        effect.setFloat("focusDistance", host.getCameraFocusDistanceMm());
+        effect.setFloat("focusDistance", host.getDofAutoFocusDistanceMm());
         effect.setFloat("focusSharpRadius", host.farDofFocusSharpRadiusMm);
         effect.setFloat("farDofStrength", host.postEffectFarDofStrengthValue);
     });
 }
 
-function ensureSignedLensDistortionShader(): void {
-    const shaderKey = "depthOfFieldPixelShader";
-    const source = Effect.ShadersStore[shaderKey];
-    if (!source || source.includes("mmdSignedLensDistortion")) {
+export function applyDofLensOpticsSettings(host: any): void {
+    const normalizedStrength = Math.max(0, Math.min(1, host.dofLensEdgeBlurValue / 3));
+    if (normalizedStrength <= 0.0001) {
+        disposeStandaloneEdgeBlurPostProcess(host);
+        if (host.lensRenderingPipeline) {
+            host.lensRenderingPipeline.dispose(false);
+            host.lensRenderingPipeline = null;
+        }
+        host.enforceFinalPostProcessOrder();
         return;
     }
 
-    const from = "float dist_amount=clamp(distortion*0.23,0.0,1.0);dist_coords=mix(coords,dist_coords,dist_amount);return dist_coords;}";
-    const to = "float dist_amount=clamp(abs(distortion)*0.23,0.0,1.0);dist_coords=mix(coords,dist_coords,dist_amount);vec2 inv_coords=vec2(0.5,0.5);inv_coords.x=0.5-direction.x*radius2*1.0;inv_coords.y=0.5-direction.y*radius2*1.0;inv_coords=mix(coords,inv_coords,dist_amount);dist_coords=distortion>=0.0?dist_coords:inv_coords;return dist_coords;}/*mmdSignedLensDistortion*/";
+    ensureStandaloneEdgeBlurShader();
 
-    if (source.includes(from)) {
-        Effect.ShadersStore[shaderKey] = source.replace(from, to);
+    if (!host.standaloneEdgeBlurPostProcess) {
+        host.standaloneEdgeBlurPostProcess = new PostProcess(
+            "standaloneEdgeBlur",
+            "mmdStandaloneEdgeBlur",
+            {
+                uniforms: [
+                    "texelSize",
+                    "edgeBlurStrength",
+                    "aspectRatio",
+                ],
+                size: 1.0,
+                camera: host.camera,
+                samplingMode: Texture.BILINEAR_SAMPLINGMODE,
+                engine: host.engine,
+                reusable: false,
+                shaderLanguage: host.getPostProcessShaderLanguage(),
+            },
+        );
+        host.standaloneEdgeBlurPostProcess.onApplyObservable.add((effect: any) => {
+            const width = Math.max(1, host.standaloneEdgeBlurPostProcess?.width ?? host.engine.getRenderWidth());
+            const height = Math.max(1, host.standaloneEdgeBlurPostProcess?.height ?? host.engine.getRenderHeight());
+            effect.setFloat2("texelSize", 1 / width, 1 / height);
+            effect.setFloat("edgeBlurStrength", Math.max(0, Math.min(1, host.dofLensEdgeBlurValue / 3)));
+            effect.setFloat("aspectRatio", width / height);
+        });
     }
-}
 
-export function applyDofLensOpticsSettings(host: any): void {
-    if (!host.lensRenderingPipeline) return;
-    host.lensRenderingPipeline.setEdgeBlur(host.dofLensEdgeBlurValue);
-    host.lensRenderingPipeline.setEdgeDistortion(0);
+    if (host.lensRenderingPipeline) {
+        host.lensRenderingPipeline.dispose(false);
+        host.lensRenderingPipeline = null;
+    }
+    host.enforceFinalPostProcessOrder();
 }
 
 export function setupLensHighlightsPipeline(host: any): void {
@@ -1191,29 +1889,5 @@ export function setupLensHighlightsPipeline(host: any): void {
         host.lensRenderingPipeline.dispose(false);
         host.lensRenderingPipeline = null;
     }
-    if (host.isWebGpuEngine()) {
-        return;
-    }
-
-    ensureSignedLensDistortionShader();
-    host.lensRenderingPipeline = new LensRenderingPipeline(
-        "DofLensHighlightsPipeline",
-        {
-            edge_blur: host.dofLensEdgeBlurValue,
-            grain_amount: 0,
-            chromatic_aberration: 0,
-            distortion: 0,
-            dof_focus_distance: Math.max(0.1, host.dofFocusDistanceMmValue / 1000),
-            dof_aperture: 0.8,
-            dof_darken: 0,
-            dof_pentagon: true,
-            dof_gain: 0,
-            dof_threshold: 1,
-            blur_noise: false,
-        },
-        host.scene,
-        1.0,
-        [host.camera]
-    );
-    applyDofLensOpticsSettings(host);
+    applyDofLensBlurSettings(host);
 }

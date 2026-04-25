@@ -9,13 +9,25 @@ import glossHighlightWgslText from "../../wgsl/gloss_highlight.wgsl?raw";
 // eslint-disable-next-line import/no-unresolved
 import fullShadowWgslText from "../../wgsl/full_shadow.wgsl?raw";
 // eslint-disable-next-line import/no-unresolved
-import lightAndShadowWgslText from "../../wgsl/light_and_shadow.wgsl?raw";
-// eslint-disable-next-line import/no-unresolved
 import matteHighlightWgslText from "../../wgsl/matte_highlight.wgsl?raw";
 // eslint-disable-next-line import/no-unresolved
 import semiMatteHighlightWgslText from "../../wgsl/semi_matte_highlight.wgsl?raw";
+// eslint-disable-next-line import/no-unresolved
+import toonHardShadowWgslText from "../../wgsl/toon_hard_shadow.wgsl?raw";
+// eslint-disable-next-line import/no-unresolved
+import fallbackAccessoryToonTextureUrl from "../assets/textures/toon/fallback_accessory_toon.bmp?url";
+// eslint-disable-next-line import/no-unresolved
+import fallbackShadowToonTextureUrl from "../assets/textures/toon/fallback_shadow_toon.bmp?url";
+import { VertexBuffer } from "@babylonjs/core/Buffers/buffer";
+import { GlowLayer } from "@babylonjs/core/Layers/glowLayer";
+import { Effect } from "@babylonjs/core/Materials/effect";
 import { Material } from "@babylonjs/core/Materials/material";
+import { RenderTargetTexture } from "@babylonjs/core/Materials/Textures/renderTargetTexture";
 import { Color3 } from "@babylonjs/core/Maths/math.color";
+import { ShaderStore } from "@babylonjs/core/Engines/shaderStore";
+import { GetExponentOfTwo } from "@babylonjs/core/Misc/tools.functions";
+import { PostProcess } from "@babylonjs/core/PostProcesses/postProcess";
+import { Texture } from "@babylonjs/core/Materials/Textures/texture";
 import type { ProjectModelMaterialShaderState } from "../types";
 
 export type WgslMaterialShaderPresetId =
@@ -38,6 +50,8 @@ export type WgslMaterialShaderPresetId =
     | "wgsl-matte-highlight"
     | "wgsl-specular"
     | "wgsl-cel-sharp"
+    | "wgsl-cel-shadow-sharp"
+    | "wgsl-accessory-toon"
     | "wgsl-rim-lift"
     | "wgsl-mono-flat";
 
@@ -45,20 +59,430 @@ type MaterialShaderDefaults = {
     disableLighting: boolean | null;
     specularPower: number | null;
     emissiveColor: Color3 | null;
+    ambientColor: Color3 | null;
     transparencyMode: number | null;
     alphaCutOff: number | null;
     forceDepthWrite: boolean | null;
     useAlphaFromDiffuseTexture: boolean | null;
     useAlphaFromAlbedoTexture: boolean | null;
+    toonTexture: any;
+    ignoreDiffuseWhenToonTextureIsNull: boolean | null;
+};
+
+type LuminousGlowLayerAlphaCutOverrideState = {
+    hasTransparencyMode: boolean;
+    transparencyMode: number | null | undefined;
+    hasAlphaCutOff: boolean;
+    alphaCutOff: number | null | undefined;
+    hasUseAlphaFromDiffuseTexture: boolean;
+    useAlphaFromDiffuseTexture: boolean | null | undefined;
+    hasUseAlphaFromAlbedoTexture: boolean;
+    useAlphaFromAlbedoTexture: boolean | null | undefined;
 };
 
 const DEFAULT_WGSL_MATERIAL_SHADER_PRESET = "wgsl-mmd-standard";
-const AUTO_LUMINOUS_BLOOM_WEIGHT = 0.42;
-const AUTO_LUMINOUS_BLOOM_THRESHOLD = 1.05;
-const AUTO_LUMINOUS_BLOOM_KERNEL = 64;
 const AUTO_LUMINOUS_BASE_LEVEL = 1.28;
 const AUTO_LUMINOUS_BRIGHTNESS_BIAS = 0.14;
 const AUTO_LUMINOUS_TINT_STRENGTH = 0.72;
+const LUMINOUS_GLOW_MIN_SHININESS = 100;
+const LUMINOUS_GLOW_AMBIENT_WEIGHT = 1;
+const LUMINOUS_GLOW_MAX_COLOR = 2;
+const LUMINOUS_GLOW_MAX_SPECULAR_LUMA = 0.06;
+const LUMINOUS_GLOW_OCCLUDER_ALPHA = 1;
+const LUMINOUS_GLOW_MAIN_TEXTURE_RATIO = 0.5;
+const LUMINOUS_GLOW_MAIN_TEXTURE_SAMPLES = 4;
+const LUMINOUS_GLOW_DEPTH_BLUR_SIGMA = 320;
+const LUMINOUS_GLOW_HALO_SATURATION = 1.35;
+const LUMINOUS_GLOW_HALO_BRIGHTNESS = 1.02;
+const LUMINOUS_GLOW_CORE_WHITE_MIX = 0.82;
+const LUMINOUS_GLOW_CORE_INTENSITY_RATIO = 0.72;
+const LUMINOUS_GLOW_HALO_INTENSITY_RATIO = 1.08;
+const LUMINOUS_GLOW_CORE_KERNEL_RATIO = 0.25;
+const LUMINOUS_GLOW_AL_MORPH_BLINK_FRAMES = 30;
+const LUMINOUS_GLOW_AL_MORPH_MAX_MULTIPLIER = 32;
+const LUMINOUS_GLOW_HALO_DEPTH_EDGE_STRENGTH = 0.72;
+const LUMINOUS_GLOW_CORE_DEPTH_EDGE_STRENGTH = 0.38;
+const LUMINOUS_GLOW_DEPTH_EDGE_THRESHOLD_LOW = 0.0008;
+const LUMINOUS_GLOW_DEPTH_EDGE_THRESHOLD_HIGH = 0.02;
+const LUMINOUS_GLOW_LAYER_ALPHA_CUTOFF = 0.5;
+const presetFallbackAccessoryToonTextureByScene = new WeakMap<object, Texture>();
+const presetFallbackShadowToonTextureByScene = new WeakMap<object, Texture>();
+
+function ensureLuminousGlowDepthBlurShader(): void {
+    const shaderKey = "mmdLuminousGlowDepthBlurFragmentShader";
+    if (!Effect.ShadersStore[shaderKey]) {
+        Effect.ShadersStore[shaderKey] = `
+                precision highp float;
+                varying vec2 vUV;
+                uniform sampler2D textureSampler;
+                uniform sampler2D depthSampler;
+                uniform vec2 screenSize;
+                uniform vec2 direction;
+                uniform float blurWidth;
+                uniform float depthSigma;
+
+                float depthWeight(float centerDepth, float sampleDepth) {
+                    return exp(-abs(sampleDepth - centerDepth) * depthSigma);
+                }
+
+                void main(void) {
+                    vec2 texel = 1.0 / max(screenSize, vec2(1.0));
+                    vec4 center = texture2D(textureSampler, vUV);
+                    float centerDepth = clamp(abs(texture2D(depthSampler, clamp(vUV, vec2(0.001), vec2(0.999))).r), 0.0, 1.0);
+                    vec4 accum = center * 0.26;
+                    float weightSum = 0.26;
+
+                    for (int i = 1; i <= 4; i++) {
+                        float t = float(i) / 4.0;
+                        float offsetScale = blurWidth * t;
+                        float baseWeight = mix(0.22, 0.06, t);
+                        vec2 delta = direction * texel * offsetScale;
+
+                        vec2 uvA = clamp(vUV + delta, vec2(0.001), vec2(0.999));
+                        vec2 uvB = clamp(vUV - delta, vec2(0.001), vec2(0.999));
+                        float depthA = clamp(abs(texture2D(depthSampler, uvA).r), 0.0, 1.0);
+                        float depthB = clamp(abs(texture2D(depthSampler, uvB).r), 0.0, 1.0);
+                        float weightA = baseWeight * depthWeight(centerDepth, depthA);
+                        float weightB = baseWeight * depthWeight(centerDepth, depthB);
+
+                        accum += texture2D(textureSampler, uvA) * weightA;
+                        accum += texture2D(textureSampler, uvB) * weightB;
+                        weightSum += weightA + weightB;
+                    }
+
+                    gl_FragColor = accum / max(weightSum, 0.0001);
+                }
+            `;
+    }
+    if (!ShaderStore.ShadersStoreWGSL[shaderKey]) {
+        ShaderStore.ShadersStoreWGSL[shaderKey] = `
+                varying vUV: vec2f;
+                var textureSamplerSampler: sampler;
+                var textureSampler: texture_2d<f32>;
+                var depthSamplerSampler: sampler;
+                var depthSampler: texture_2d<f32>;
+                uniform screenSize: vec2f;
+                uniform direction: vec2f;
+                uniform blurWidth: f32;
+                uniform depthSigma: f32;
+
+                fn depthWeight(centerDepth: f32, sampleDepth: f32) -> f32 {
+                    return exp(-abs(sampleDepth - centerDepth) * uniforms.depthSigma);
+                }
+
+                @fragment
+                fn main(input: FragmentInputs) -> FragmentOutputs {
+                    let texel = 1.0 / max(uniforms.screenSize, vec2f(1.0));
+                    let center = textureSample(textureSampler, textureSamplerSampler, input.vUV);
+                    let centerDepth = clamp(abs(textureSampleLevel(depthSampler, depthSamplerSampler, clamp(input.vUV, vec2f(0.001), vec2f(0.999)), 0.0).r), 0.0, 1.0);
+
+                    var accum = center * 0.26;
+                    var weightSum = 0.26;
+
+                    for (var i: i32 = 1; i <= 4; i = i + 1) {
+                        let t = f32(i) / 4.0;
+                        let offsetScale = uniforms.blurWidth * t;
+                        let baseWeight = mix(0.22, 0.06, t);
+                        let delta = uniforms.direction * texel * offsetScale;
+
+                        let uvA = clamp(input.vUV + delta, vec2f(0.001), vec2f(0.999));
+                        let uvB = clamp(input.vUV - delta, vec2f(0.001), vec2f(0.999));
+                        let depthA = clamp(abs(textureSampleLevel(depthSampler, depthSamplerSampler, uvA, 0.0).r), 0.0, 1.0);
+                        let depthB = clamp(abs(textureSampleLevel(depthSampler, depthSamplerSampler, uvB, 0.0).r), 0.0, 1.0);
+                        let weightA = baseWeight * depthWeight(centerDepth, depthA);
+                        let weightB = baseWeight * depthWeight(centerDepth, depthB);
+
+                        accum = accum + textureSample(textureSampler, textureSamplerSampler, uvA) * weightA;
+                        accum = accum + textureSample(textureSampler, textureSamplerSampler, uvB) * weightB;
+                        weightSum = weightSum + weightA + weightB;
+                    }
+
+                    fragmentOutputs.color = accum / max(weightSum, 0.0001);
+                    return fragmentOutputs;
+                }
+            `;
+    }
+}
+
+function ensureLuminousGlowDepthMergeShader(): void {
+    const vertexShaderKey = "mmdLuminousGlowMergeVertexShader";
+    const fragmentShaderKey = "mmdLuminousGlowMergePixelShader";
+    if (!Effect.ShadersStore[vertexShaderKey]) {
+        Effect.ShadersStore[vertexShaderKey] = `
+                attribute vec2 position;
+                varying vec2 vUV;
+                const vec2 madd = vec2(0.5, 0.5);
+                void main(void) {
+                    vUV = position * madd + madd;
+                    gl_Position = vec4(position, 0.0, 1.0);
+                }
+            `;
+    }
+    if (!ShaderStore.ShadersStoreWGSL[vertexShaderKey]) {
+        ShaderStore.ShadersStoreWGSL[vertexShaderKey] = `
+                attribute position: vec2f;
+                varying vUV: vec2f;
+                @vertex
+                fn main(input: VertexInputs)->FragmentInputs {
+                    let madd: vec2f = vec2f(0.5, 0.5);
+                    vertexOutputs.vUV = input.position * madd + madd;
+                    vertexOutputs.position = vec4f(input.position, 0.0, 1.0);
+                }
+            `;
+    }
+    if (!Effect.ShadersStore[fragmentShaderKey]) {
+        Effect.ShadersStore[fragmentShaderKey] = `
+                varying vec2 vUV;
+                uniform sampler2D textureSampler;
+                uniform sampler2D textureSampler2;
+                uniform sampler2D depthSampler;
+                uniform vec2 screenSize;
+                uniform float offset;
+                uniform float edgeStrength;
+                uniform float edgeThresholdLow;
+                uniform float edgeThresholdHigh;
+
+                float readDepth(vec2 uv) {
+                    return clamp(abs(texture2D(depthSampler, clamp(uv, vec2(0.001), vec2(0.999))).r), 0.0, 1.0);
+                }
+
+                void main(void) {
+                    vec4 baseColor = (texture2D(textureSampler, vUV) + texture2D(textureSampler2, vUV)) * offset;
+                    vec2 texel = 1.0 / max(screenSize, vec2(1.0));
+
+                    float centerDepth = readDepth(vUV);
+                    float edge = 0.0;
+                    edge = max(edge, abs(readDepth(vUV + vec2(texel.x, 0.0)) - centerDepth));
+                    edge = max(edge, abs(readDepth(vUV - vec2(texel.x, 0.0)) - centerDepth));
+                    edge = max(edge, abs(readDepth(vUV + vec2(0.0, texel.y)) - centerDepth));
+                    edge = max(edge, abs(readDepth(vUV - vec2(0.0, texel.y)) - centerDepth));
+
+                    float edgeMask = smoothstep(edgeThresholdLow, edgeThresholdHigh, edge);
+                    float nearMask = 1.0 - smoothstep(0.92, 1.0, centerDepth);
+                    float attenuation = 1.0 - (edgeMask * nearMask * edgeStrength);
+                    baseColor.rgb *= clamp(attenuation, 0.0, 1.0);
+                    baseColor.a *= clamp(1.0 - edgeMask * edgeStrength * 0.35, 0.0, 1.0);
+
+                    gl_FragColor = baseColor;
+                }
+            `;
+    }
+    if (!ShaderStore.ShadersStoreWGSL[fragmentShaderKey]) {
+        ShaderStore.ShadersStoreWGSL[fragmentShaderKey] = `
+                varying vUV: vec2f;
+                var textureSamplerSampler: sampler;
+                var textureSampler: texture_2d<f32>;
+                var textureSampler2Sampler: sampler;
+                var textureSampler2: texture_2d<f32>;
+                var depthSamplerSampler: sampler;
+                var depthSampler: texture_2d<f32>;
+                uniform screenSize: vec2f;
+                uniform offset: f32;
+                uniform edgeStrength: f32;
+                uniform edgeThresholdLow: f32;
+                uniform edgeThresholdHigh: f32;
+
+                fn readDepth(uv: vec2f) -> f32 {
+                    return clamp(abs(textureSampleLevel(depthSampler, depthSamplerSampler, clamp(uv, vec2f(0.001), vec2f(0.999)), 0.0).r), 0.0, 1.0);
+                }
+
+                @fragment
+                fn main(input: FragmentInputs)->FragmentOutputs {
+                    var baseColor = (textureSample(textureSampler, textureSamplerSampler, input.vUV)
+                        + textureSample(textureSampler2, textureSampler2Sampler, input.vUV)) * uniforms.offset;
+                    let texel = 1.0 / max(uniforms.screenSize, vec2f(1.0));
+
+                    let centerDepth = readDepth(input.vUV);
+                    var edge = 0.0;
+                    edge = max(edge, abs(readDepth(input.vUV + vec2f(texel.x, 0.0)) - centerDepth));
+                    edge = max(edge, abs(readDepth(input.vUV - vec2f(texel.x, 0.0)) - centerDepth));
+                    edge = max(edge, abs(readDepth(input.vUV + vec2f(0.0, texel.y)) - centerDepth));
+                    edge = max(edge, abs(readDepth(input.vUV - vec2f(0.0, texel.y)) - centerDepth));
+
+                    let edgeMask = smoothstep(uniforms.edgeThresholdLow, uniforms.edgeThresholdHigh, edge);
+                    let nearMask = 1.0 - smoothstep(0.92, 1.0, centerDepth);
+                    let attenuation = clamp(1.0 - (edgeMask * nearMask * uniforms.edgeStrength), 0.0, 1.0);
+                    baseColor = vec4f(
+                        baseColor.rgb * attenuation,
+                        baseColor.a * clamp(1.0 - edgeMask * uniforms.edgeStrength * 0.35, 0.0, 1.0),
+                    );
+
+                    fragmentOutputs.color = baseColor;
+                    return fragmentOutputs;
+                }
+            `;
+    }
+}
+
+class LuminousGlowLayer extends GlowLayer {
+    public readonly mmdLuminousGlowLayer = true;
+    private readonly mmdGlowHost: any;
+    private readonly mmdDepthEdgeStrength: number;
+    private static constructingHost: any = null;
+    private static constructingDepthEdgeStrength = 0;
+
+    public constructor(host: any, name: string, scene: any, options?: any) {
+        LuminousGlowLayer.constructingHost = host;
+        LuminousGlowLayer.constructingDepthEdgeStrength = Number(options?.mmdDepthEdgeStrength ?? 0);
+        super(name, scene, options);
+        this.mmdGlowHost = host;
+        this.mmdDepthEdgeStrength = LuminousGlowLayer.constructingDepthEdgeStrength;
+        LuminousGlowLayer.constructingHost = null;
+        LuminousGlowLayer.constructingDepthEdgeStrength = 0;
+    }
+
+    protected override _createMergeEffect(): any {
+        ensureLuminousGlowDepthMergeShader();
+        const self = this as any;
+        let defines = "#define EMISSIVE\n";
+        if (self._options?.ldrMerge) {
+            defines += "#define LDR\n";
+        }
+        return self._engine.createEffect(
+            "mmdLuminousGlowMerge",
+            [VertexBuffer.PositionKind],
+            ["offset", "screenSize", "edgeStrength", "edgeThresholdLow", "edgeThresholdHigh"],
+            ["textureSampler", "textureSampler2", "depthSampler"],
+            defines,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            this.shaderLanguage,
+        );
+    }
+
+    protected override _canRenderMesh(_mesh: any, _material: any): boolean {
+        // Let alpha-blended meshes participate so they can occlude hidden luminous parts.
+        return true;
+    }
+
+    protected override _renderSubMesh(subMesh: any, enableAlphaMode = false): void {
+        const material = subMesh?.getMaterial?.();
+        const restoreAlphaCutOverride = beginLuminousGlowLayerAlphaCutOverride(this.mmdGlowHost, material);
+        try {
+            super._renderSubMesh(subMesh, enableAlphaMode);
+        } finally {
+            restoreAlphaCutOverride?.();
+        }
+    }
+
+    protected override _createTextureAndPostProcesses(): void {
+        ensureLuminousGlowDepthBlurShader();
+        ensureLuminousGlowDepthMergeShader();
+
+        const self = this as any;
+        const host = this.mmdGlowHost ?? LuminousGlowLayer.constructingHost;
+        self._thinEffectLayer._renderPassId = self._mainTexture.renderPassId;
+
+        let blurTextureWidth = self._mainTextureDesiredSize.width;
+        let blurTextureHeight = self._mainTextureDesiredSize.height;
+        blurTextureWidth = self._engine.needPOTTextures ? GetExponentOfTwo(blurTextureWidth, self._maxSize) : blurTextureWidth;
+        blurTextureHeight = self._engine.needPOTTextures ? GetExponentOfTwo(blurTextureHeight, self._maxSize) : blurTextureHeight;
+
+        const textureType = self._engine.getCaps().textureHalfFloatRender ? 2 : 0;
+        self._blurTexture1 = new RenderTargetTexture("GlowLayerBlurRTT", {
+            width: blurTextureWidth,
+            height: blurTextureHeight,
+        }, self._scene, false, true, textureType);
+        self._blurTexture1.wrapU = Texture.CLAMP_ADDRESSMODE;
+        self._blurTexture1.wrapV = Texture.CLAMP_ADDRESSMODE;
+        self._blurTexture1.updateSamplingMode(Texture.BILINEAR_SAMPLINGMODE);
+        self._blurTexture1.renderParticles = false;
+        self._blurTexture1.ignoreCameraViewport = true;
+
+        const blurTextureWidth2 = Math.max(1, Math.floor(blurTextureWidth / 2));
+        const blurTextureHeight2 = Math.max(1, Math.floor(blurTextureHeight / 2));
+        self._blurTexture2 = new RenderTargetTexture("GlowLayerBlurRTT2", {
+            width: blurTextureWidth2,
+            height: blurTextureHeight2,
+        }, self._scene, false, true, textureType);
+        self._blurTexture2.wrapU = Texture.CLAMP_ADDRESSMODE;
+        self._blurTexture2.wrapV = Texture.CLAMP_ADDRESSMODE;
+        self._blurTexture2.updateSamplingMode(Texture.BILINEAR_SAMPLINGMODE);
+        self._blurTexture2.renderParticles = false;
+        self._blurTexture2.ignoreCameraViewport = true;
+
+        self._textures = [self._blurTexture1, self._blurTexture2];
+        self._thinEffectLayer.bindTexturesForCompose = (effect: any) => {
+            const depthMap = host?.depthRenderer?.getDepthMap?.();
+            effect.setTexture("textureSampler", self._blurTexture1);
+            effect.setTexture("textureSampler2", self._blurTexture2);
+            effect.setTexture("depthSampler", depthMap ?? self._mainTexture);
+            effect.setFloat("offset", this.intensity);
+            effect.setFloat2("screenSize", self._engine.getRenderWidth(), self._engine.getRenderHeight());
+            effect.setFloat("edgeStrength", depthMap ? this.mmdDepthEdgeStrength : 0);
+            effect.setFloat("edgeThresholdLow", LUMINOUS_GLOW_DEPTH_EDGE_THRESHOLD_LOW);
+            effect.setFloat("edgeThresholdHigh", LUMINOUS_GLOW_DEPTH_EDGE_THRESHOLD_HIGH);
+        };
+
+        const createDepthAwareBlur = (name: string, width: number, height: number, directionX: number, directionY: number): PostProcess => {
+            const postProcess = new PostProcess(
+                name,
+                "mmdLuminousGlowDepthBlur",
+                {
+                    uniforms: ["screenSize", "direction", "blurWidth", "depthSigma"],
+                    samplers: ["depthSampler"],
+                    width,
+                    height,
+                    samplingMode: Texture.BILINEAR_SAMPLINGMODE,
+                    engine: self._scene.getEngine(),
+                    reusable: false,
+                    shaderLanguage: self.shaderLanguage,
+                },
+            );
+            postProcess.autoClear = false;
+            postProcess.onApplyObservable.add((effect: any) => {
+                const depthMap = host?.depthRenderer?.getDepthMap?.();
+                effect.setTexture("depthSampler", depthMap ?? self._mainTexture);
+                effect.setFloat2("screenSize", width, height);
+                effect.setFloat2("direction", directionX, directionY);
+                effect.setFloat("blurWidth", this.blurKernelSize * 0.5);
+                effect.setFloat("depthSigma", LUMINOUS_GLOW_DEPTH_BLUR_SIGMA);
+            });
+            return postProcess;
+        };
+
+        self._horizontalBlurPostprocess1 = createDepthAwareBlur("GlowLayerDepthBlurH1", blurTextureWidth, blurTextureHeight, 1, 0);
+        self._verticalBlurPostprocess1 = createDepthAwareBlur("GlowLayerDepthBlurV1", blurTextureWidth, blurTextureHeight, 0, 1);
+        self._horizontalBlurPostprocess2 = createDepthAwareBlur("GlowLayerDepthBlurH2", blurTextureWidth2, blurTextureHeight2, 1, 0);
+        self._verticalBlurPostprocess2 = createDepthAwareBlur("GlowLayerDepthBlurV2", blurTextureWidth2, blurTextureHeight2, 0, 1);
+        self._horizontalBlurPostprocess1.externalTextureSamplerBinding = true;
+        self._horizontalBlurPostprocess1.onApplyObservable.add((effect: any) => {
+            effect.setTexture("textureSampler", self._mainTexture);
+        });
+        self._horizontalBlurPostprocess2.externalTextureSamplerBinding = true;
+        self._horizontalBlurPostprocess2.onApplyObservable.add((effect: any) => {
+            effect.setTexture("textureSampler", self._blurTexture1);
+        });
+        self._postProcesses = [
+            self._horizontalBlurPostprocess1,
+            self._verticalBlurPostprocess1,
+            self._horizontalBlurPostprocess2,
+            self._verticalBlurPostprocess2,
+        ];
+        self._postProcesses1 = [self._horizontalBlurPostprocess1, self._verticalBlurPostprocess1];
+        self._postProcesses2 = [self._horizontalBlurPostprocess2, self._verticalBlurPostprocess2];
+        self._mainTexture.samples = self._options.mainTextureSamples;
+        self._mainTexture.onAfterUnbindObservable.add(() => {
+            const depthMap = host?.depthRenderer?.getDepthMap?.();
+            const internalTexture = self._blurTexture1.renderTarget;
+            if (internalTexture) {
+                if (!depthMap) {
+                    return;
+                }
+                self._scene.postProcessManager.directRender(self._postProcesses1, internalTexture, true);
+                const internalTexture2 = self._blurTexture2.renderTarget;
+                if (internalTexture2) {
+                    self._scene.postProcessManager.directRender(self._postProcesses2, internalTexture2, true);
+                }
+                self._engine.unBindFramebuffer(internalTexture2 ?? internalTexture, true);
+            }
+        });
+        self._mainTextureCreatedSize.width = self._mainTextureDesiredSize.width;
+        self._mainTextureCreatedSize.height = self._mainTextureDesiredSize.height;
+    }
+}
 
 function getPresetCatalog(host: any): readonly { id: WgslMaterialShaderPresetId; label: string }[] {
     return host.constructor.WGSL_MATERIAL_SHADER_PRESETS ?? [];
@@ -79,6 +503,352 @@ function cloneColor3OrNull(value: any): Color3 | null {
     const b = Number(value.b);
     if (!Number.isFinite(r) || !Number.isFinite(g) || !Number.isFinite(b)) return null;
     return new Color3(r, g, b);
+}
+
+function readMaterialColor(material: any, propertyNames: readonly string[]): Color3 | null {
+    if (!material || typeof material !== "object") return null;
+    for (const propertyName of propertyNames) {
+        const color = cloneColor3OrNull(material[propertyName]);
+        if (color) {
+            return color;
+        }
+    }
+    return null;
+}
+
+function readMaterialTexture(material: any, propertyNames: readonly string[]): Texture | null {
+    if (!material || typeof material !== "object") return null;
+    for (const propertyName of propertyNames) {
+        const texture = material[propertyName];
+        if (texture && typeof texture === "object") {
+            return texture as Texture;
+        }
+    }
+    return null;
+}
+
+function computeColorLuminance(color: Color3 | null): number {
+    if (!color) return 0;
+    return Math.max(0, color.r * 0.299 + color.g * 0.587 + color.b * 0.114);
+}
+
+function scaleColor(color: Color3, factor: number): Color3 {
+    return new Color3(
+        Math.max(0, color.r * factor),
+        Math.max(0, color.g * factor),
+        Math.max(0, color.b * factor),
+    );
+}
+
+function saturateColor(color: Color3, amount: number): Color3 {
+    const luma = computeColorLuminance(color);
+    return new Color3(
+        Math.max(0, luma + (color.r - luma) * amount),
+        Math.max(0, luma + (color.g - luma) * amount),
+        Math.max(0, luma + (color.b - luma) * amount),
+    );
+}
+
+function mixColorTowardValue(color: Color3, target: number, amount: number): Color3 {
+    return new Color3(
+        Math.max(0, color.r + (target - color.r) * amount),
+        Math.max(0, color.g + (target - color.g) * amount),
+        Math.max(0, color.b + (target - color.b) * amount),
+    );
+}
+
+function clampUnit(value: number): number {
+    if (!Number.isFinite(value)) return 0;
+    return Math.max(0, Math.min(1, value));
+}
+
+function lerpNumber(from: number, to: number, amount: number): number {
+    return from + (to - from) * clampUnit(amount);
+}
+
+function createLuminousGlowOccluderState(texture: Texture | null): {
+    coreColor: Color3;
+    haloColor: Color3;
+    alpha: number;
+    texture: Texture | null;
+    luminous: boolean;
+} {
+    return {
+        coreColor: Color3.Black(),
+        haloColor: Color3.Black(),
+        alpha: LUMINOUS_GLOW_OCCLUDER_ALPHA,
+        texture,
+        luminous: false,
+    };
+}
+
+function getLuminousGlowMorphWeight(model: any, morphName: string): number {
+    const modelMorph = model?.morph;
+    if (!modelMorph || typeof morphName !== "string" || morphName.length === 0) {
+        return 0;
+    }
+    try {
+        return clampUnit(Number(modelMorph.getMorphWeight(morphName)));
+    } catch {
+        return 0;
+    }
+}
+
+function getLuminousGlowMorphTimelineKey(host: any): number {
+    const runtimeFrame = Number(host?.mmdRuntime?.currentFrameTime);
+    if (Number.isFinite(runtimeFrame)) {
+        return runtimeFrame;
+    }
+    const currentFrame = Number(host?.currentFrame);
+    if (Number.isFinite(currentFrame)) {
+        return currentFrame;
+    }
+    return 0;
+}
+
+function getLuminousGlowMorphRevision(host: any): number {
+    const revision = Number(host?.luminousGlowMorphRevision);
+    if (!Number.isFinite(revision)) {
+        return 0;
+    }
+    return revision;
+}
+
+function getLuminousGlowMorphScaleForModel(host: any, model: any): number {
+    if (!model || typeof model !== "object") {
+        return 1;
+    }
+
+    const cache = host.luminousGlowMorphScaleByModel as WeakMap<object, {
+        timelineKey: number;
+        revision: number;
+        scale: number;
+    }> | undefined;
+    const resolvedCache = cache ?? new WeakMap<object, { timelineKey: number; revision: number; scale: number }>();
+    if (!cache) {
+        host.luminousGlowMorphScaleByModel = resolvedCache;
+    }
+
+    const timelineKey = getLuminousGlowMorphTimelineKey(host);
+    const revision = getLuminousGlowMorphRevision(host);
+    const modelKey = model as object;
+    const cached = resolvedCache.get(modelKey);
+    if (cached && cached.timelineKey === timelineKey && cached.revision === revision) {
+        return cached.scale;
+    }
+
+    const lightOff = getLuminousGlowMorphWeight(model, "LightOff");
+    const lightUp = getLuminousGlowMorphWeight(model, "LightUp");
+    const lightUpE = getLuminousGlowMorphWeight(model, "LightUpE");
+    const lightBlink = getLuminousGlowMorphWeight(model, "LightBlink");
+    const lightBS = getLuminousGlowMorphWeight(model, "LightBS");
+    const lightDuty = getLuminousGlowMorphWeight(model, "LightDuty");
+    const lightMin = getLuminousGlowMorphWeight(model, "LightMin");
+    const clockUp = getLuminousGlowMorphWeight(model, "LClockUp");
+    const clockDown = getLuminousGlowMorphWeight(model, "LClockDown");
+
+    let scale = 1;
+    scale *= lerpNumber(1, 2.2, lightUp);
+    scale *= lerpNumber(1, 12, lightUpE);
+    scale *= lerpNumber(1, 0, lightOff);
+
+    const blinkSpeedScale = lerpNumber(1, 6, clockUp) / Math.max(1e-4, lerpNumber(1, 6, clockDown));
+    const normalizedFrame = (timelineKey * blinkSpeedScale) / LUMINOUS_GLOW_AL_MORPH_BLINK_FRAMES;
+    const blinkPhase = normalizedFrame - Math.floor(normalizedFrame);
+    const blinkFloor = clampUnit(lightMin);
+    const sineWave = blinkFloor + (1 - blinkFloor) * (0.5 + 0.5 * Math.sin(normalizedFrame * Math.PI * 2));
+    const squareThreshold = Math.max(0.05, Math.min(0.95, 0.5 + lightDuty * 0.4));
+    const squareWave = blinkFloor + (1 - blinkFloor) * (blinkPhase < squareThreshold ? 1 : 0);
+
+    if (lightBlink > 1e-6) {
+        scale *= lerpNumber(1, sineWave, lightBlink);
+    }
+    if (lightBS > 1e-6) {
+        scale *= lerpNumber(1, squareWave, lightBS);
+    }
+
+    scale = Math.max(0, Math.min(LUMINOUS_GLOW_AL_MORPH_MAX_MULTIPLIER, scale));
+    resolvedCache.set(modelKey, { timelineKey, revision, scale });
+    return scale;
+}
+
+function getLuminousGlowMorphScaleForMesh(host: any, mesh: any): number {
+    if (!mesh || typeof mesh !== "object") {
+        return 1;
+    }
+
+    const cachedModelByMesh = host.luminousGlowModelByMesh as WeakMap<object, object> | undefined;
+    const resolvedModelByMesh = cachedModelByMesh ?? new WeakMap<object, object>();
+    if (!cachedModelByMesh) {
+        host.luminousGlowModelByMesh = resolvedModelByMesh;
+    }
+
+    const meshKey = mesh as object;
+    const cachedModel = resolvedModelByMesh.get(meshKey);
+    if (cachedModel) {
+        return getLuminousGlowMorphScaleForModel(host, cachedModel);
+    }
+
+    let rootMesh = mesh;
+    while (rootMesh?.parent) {
+        rootMesh = rootMesh.parent;
+    }
+
+    for (const sceneModel of host.sceneModels ?? []) {
+        if (sceneModel?.mesh === mesh || sceneModel?.mesh === rootMesh) {
+            resolvedModelByMesh.set(meshKey, sceneModel.model as object);
+            return getLuminousGlowMorphScaleForModel(host, sceneModel.model);
+        }
+    }
+
+    return 1;
+}
+
+function isLuminousGlowPresetMaterial(host: any, material: any): boolean {
+    if (!material || typeof material !== "object") {
+        return false;
+    }
+    return getWgslMaterialShaderPresetForMaterial(host, material) === "wgsl-autoluminous";
+}
+
+function getLuminousGlowMaterialState(host: any, material: any): {
+    coreColor: Color3;
+    haloColor: Color3;
+    alpha: number;
+    texture: Texture | null;
+    luminous: boolean;
+} | null {
+    if (!material || typeof material !== "object") return null;
+    if (host.isMaterialVisible?.(material) === false) {
+        return null;
+    }
+
+    const defaults = ensureMaterialShaderDefaults(host, material);
+    const currentShininess = Number(material.specularPower);
+    const defaultShininess = Number(defaults.specularPower);
+    const shininess = Number.isFinite(currentShininess) && Number.isFinite(defaultShininess)
+        ? Math.max(currentShininess, defaultShininess)
+        : (Number.isFinite(currentShininess) ? currentShininess : defaultShininess);
+    const texture = readMaterialTexture(material, ["diffuseTexture", "albedoTexture"]);
+    const baseAlpha = Number.isFinite(Number(material.alpha))
+        ? Math.max(0, Math.min(1, Number(material.alpha)))
+        : 1;
+    const manualGlow = Boolean(host.postEffectGlowEnabledValue) && Number(host.postEffectGlowIntensityValue) > 1e-6;
+    const presetLuminous = isLuminousGlowPresetMaterial(host, material);
+    const allowHeuristicGlow = manualGlow;
+    const specularColor = readMaterialColor(material, ["specularColor", "reflectivityColor"]);
+    const specularLuma = computeColorLuminance(specularColor);
+    if (!presetLuminous && !allowHeuristicGlow) {
+        return createLuminousGlowOccluderState(texture);
+    }
+    if (!presetLuminous && (!Number.isFinite(shininess) || shininess < LUMINOUS_GLOW_MIN_SHININESS)) {
+        return createLuminousGlowOccluderState(texture);
+    }
+    if (!presetLuminous && specularLuma > LUMINOUS_GLOW_MAX_SPECULAR_LUMA) {
+        return createLuminousGlowOccluderState(texture);
+    }
+
+    const diffuseColor = readMaterialColor(material, ["diffuseColor", "albedoColor", "baseColor"]) ?? Color3.Black();
+    const ambientColor = readMaterialColor(material, ["ambientColor"]) ?? Color3.Black();
+    const combined = new Color3(
+        Math.min(LUMINOUS_GLOW_MAX_COLOR, Math.max(0, diffuseColor.r + ambientColor.r * LUMINOUS_GLOW_AMBIENT_WEIGHT)),
+        Math.min(LUMINOUS_GLOW_MAX_COLOR, Math.max(0, diffuseColor.g + ambientColor.g * LUMINOUS_GLOW_AMBIENT_WEIGHT)),
+        Math.min(LUMINOUS_GLOW_MAX_COLOR, Math.max(0, diffuseColor.b + ambientColor.b * LUMINOUS_GLOW_AMBIENT_WEIGHT)),
+    );
+    const maxChannel = Math.max(combined.r, combined.g, combined.b);
+    if (maxChannel <= 1e-4) {
+        return createLuminousGlowOccluderState(texture);
+    }
+
+    const strength = presetLuminous
+        ? 1.25
+        : Math.min(2.5, 0.75 + Math.max(0, shininess - LUMINOUS_GLOW_MIN_SHININESS) / 60);
+    const luminousColor = new Color3(
+        combined.r * strength,
+        combined.g * strength,
+        combined.b * strength,
+    );
+    const luminousPeak = Math.max(luminousColor.r, luminousColor.g, luminousColor.b);
+    const haloColor = saturateColor(
+        scaleColor(luminousColor, LUMINOUS_GLOW_HALO_BRIGHTNESS),
+        LUMINOUS_GLOW_HALO_SATURATION,
+    );
+    const coreColor = mixColorTowardValue(
+        scaleColor(luminousColor, 1.08),
+        luminousPeak * 1.1,
+        LUMINOUS_GLOW_CORE_WHITE_MIX,
+    );
+
+    return {
+        coreColor,
+        haloColor,
+        alpha: Math.max(0.05, baseAlpha),
+        texture,
+        luminous: true,
+    };
+}
+
+function disposeManagedLuminousGlowLayer(host: any): void {
+    if (host.luminousGlowLayer) {
+        host.luminousGlowLayer.dispose();
+        host.luminousGlowLayer = null;
+    }
+    if (host.luminousGlowCoreLayer) {
+        host.luminousGlowCoreLayer.dispose();
+        host.luminousGlowCoreLayer = null;
+    }
+}
+
+function getManagedLuminousGlowKernel(baseKernel: number, kind: "core" | "halo"): number {
+    if (kind === "core") {
+        return Math.max(4, Math.round(baseKernel * LUMINOUS_GLOW_CORE_KERNEL_RATIO));
+    }
+    return baseKernel;
+}
+
+function getManagedLuminousGlowIntensity(baseIntensity: number, kind: "core" | "halo"): number {
+    if (kind === "core") {
+        return baseIntensity * LUMINOUS_GLOW_CORE_INTENSITY_RATIO;
+    }
+    return baseIntensity * LUMINOUS_GLOW_HALO_INTENSITY_RATIO;
+}
+
+function getManagedLuminousGlowDepthEdgeStrength(kind: "core" | "halo"): number {
+    if (kind === "core") {
+        return LUMINOUS_GLOW_CORE_DEPTH_EDGE_STRENGTH;
+    }
+    return LUMINOUS_GLOW_HALO_DEPTH_EDGE_STRENGTH;
+}
+
+function ensureManagedLuminousGlowLayer(host: any, kind: "core" | "halo"): GlowLayer | null {
+    const propertyName = kind === "core" ? "luminousGlowCoreLayer" : "luminousGlowLayer";
+    const layerName = kind === "core" ? "luminousGlowCore" : "luminousGlow";
+    const existingLayer = host[propertyName];
+    if (existingLayer) {
+        if ((existingLayer as any).mmdLuminousGlowLayer === true) {
+            return existingLayer as GlowLayer;
+        }
+        existingLayer.dispose();
+        host[propertyName] = null;
+    }
+    if (!host.scene) {
+        return null;
+    }
+    if (!host.depthRenderer) {
+        host.configureDofDepthRenderer?.();
+    }
+
+    const glowLayer = new LuminousGlowLayer(host, layerName, host.scene, {
+        mainTextureRatio: LUMINOUS_GLOW_MAIN_TEXTURE_RATIO,
+        mainTextureSamples: LUMINOUS_GLOW_MAIN_TEXTURE_SAMPLES,
+        blurKernelSize: getManagedLuminousGlowKernel(
+            host.postEffectGlowKernelValue ?? GlowLayer.DefaultBlurKernelSize,
+            kind,
+        ),
+        mmdDepthEdgeStrength: getManagedLuminousGlowDepthEdgeStrength(kind),
+    });
+    host[propertyName] = glowLayer;
+    return glowLayer;
 }
 
 function setMaterialColorProperty(material: any, propertyName: string, color: Color3): void {
@@ -149,6 +919,73 @@ function hasActualAlphaTextureSource(material: any): boolean {
         || Boolean(material?.opacityTexture);
 }
 
+function beginLuminousGlowLayerAlphaCutOverride(host: any, material: any): (() => void) | null {
+    if (!material || typeof material !== "object") {
+        return null;
+    }
+    if (!hasActualAlphaTextureSource(material)) {
+        return null;
+    }
+
+    const glowState = getLuminousGlowMaterialState(host, material);
+    if (!glowState || glowState.luminous) {
+        return null;
+    }
+
+    const state: LuminousGlowLayerAlphaCutOverrideState = {
+        hasTransparencyMode: "transparencyMode" in material,
+        transparencyMode: "transparencyMode" in material && typeof material.transparencyMode === "number"
+            ? material.transparencyMode
+            : undefined,
+        hasAlphaCutOff: "alphaCutOff" in material,
+        alphaCutOff: "alphaCutOff" in material && Number.isFinite(Number(material.alphaCutOff))
+            ? Number(material.alphaCutOff)
+            : undefined,
+        hasUseAlphaFromDiffuseTexture: "useAlphaFromDiffuseTexture" in material,
+        useAlphaFromDiffuseTexture: "useAlphaFromDiffuseTexture" in material
+            ? Boolean(material.useAlphaFromDiffuseTexture)
+            : undefined,
+        hasUseAlphaFromAlbedoTexture: "useAlphaFromAlbedoTexture" in material,
+        useAlphaFromAlbedoTexture: "useAlphaFromAlbedoTexture" in material
+            ? Boolean(material.useAlphaFromAlbedoTexture)
+            : undefined,
+    };
+
+    if ("useAlphaFromDiffuseTexture" in material) {
+        material.useAlphaFromDiffuseTexture = false;
+    }
+    if ("useAlphaFromAlbedoTexture" in material) {
+        material.useAlphaFromAlbedoTexture = false;
+    }
+    if ("alphaCutOff" in material) {
+        const currentAlphaCutOff = Number.isFinite(Number(material.alphaCutOff))
+            ? Number(material.alphaCutOff)
+            : 0;
+        material.alphaCutOff = Math.max(currentAlphaCutOff, LUMINOUS_GLOW_LAYER_ALPHA_CUTOFF);
+    }
+    if ("transparencyMode" in material) {
+        material.transparencyMode = Material.MATERIAL_ALPHATEST;
+    }
+
+    return () => {
+        if (!material || typeof material !== "object") {
+            return;
+        }
+        if (state.hasTransparencyMode && "transparencyMode" in material) {
+            material.transparencyMode = state.transparencyMode;
+        }
+        if (state.hasAlphaCutOff && "alphaCutOff" in material) {
+            material.alphaCutOff = state.alphaCutOff;
+        }
+        if (state.hasUseAlphaFromDiffuseTexture && "useAlphaFromDiffuseTexture" in material) {
+            material.useAlphaFromDiffuseTexture = state.useAlphaFromDiffuseTexture;
+        }
+        if (state.hasUseAlphaFromAlbedoTexture && "useAlphaFromAlbedoTexture" in material) {
+            material.useAlphaFromAlbedoTexture = state.useAlphaFromAlbedoTexture;
+        }
+    };
+}
+
 function markMaterialShaderDirty(material: any): void {
     if (!material || typeof material !== "object") return;
 
@@ -171,10 +1008,109 @@ function markMaterialShaderDirty(material: any): void {
     }
 }
 
+function setPresetWgslToonFragmentForMaterial(host: any, material: any, source: string | null): void {
+    const key = getMaterialKey(material);
+    if (!key) return;
+
+    if (typeof source === "string" && source.length > 0) {
+        host.constructor.presetWgslToonFragmentByMaterial.set(key, source);
+        return;
+    }
+
+    host.constructor.presetWgslToonFragmentByMaterial.delete(key);
+}
+
+function getPresetFallbackShadowToonTexture(host: any): Texture | null {
+    const scene = host?.scene;
+    if (!scene || typeof scene !== "object") return null;
+
+    const cached = presetFallbackShadowToonTextureByScene.get(scene as object);
+    if (cached) return cached;
+
+    const texture = new Texture(fallbackShadowToonTextureUrl, scene, false, true, Texture.BILINEAR_SAMPLINGMODE);
+    texture.name = "preset:fallback_shadow_toon";
+    texture.wrapU = Texture.CLAMP_ADDRESSMODE;
+    texture.wrapV = Texture.CLAMP_ADDRESSMODE;
+    texture.updateSamplingMode(Texture.BILINEAR_SAMPLINGMODE);
+    presetFallbackShadowToonTextureByScene.set(scene as object, texture);
+    return texture;
+}
+
+function getPresetFallbackAccessoryToonTexture(host: any): Texture | null {
+    const scene = host?.scene;
+    if (!scene || typeof scene !== "object") return null;
+
+    const cached = presetFallbackAccessoryToonTextureByScene.get(scene as object);
+    if (cached) return cached;
+
+    const texture = new Texture(fallbackAccessoryToonTextureUrl, scene, false, true, Texture.BILINEAR_SAMPLINGMODE);
+    texture.name = "preset:fallback_accessory_toon";
+    texture.wrapU = Texture.CLAMP_ADDRESSMODE;
+    texture.wrapV = Texture.CLAMP_ADDRESSMODE;
+    texture.updateSamplingMode(Texture.BILINEAR_SAMPLINGMODE);
+    presetFallbackAccessoryToonTextureByScene.set(scene as object, texture);
+    return texture;
+}
+
+function setPresetFallbackToonTexture(host: any, material: any, kind: "shadow" | "accessory"): void {
+    if (!material || typeof material !== "object") return;
+    if (!("toonTexture" in material)) return;
+
+    const fallbackTexture = kind === "accessory"
+        ? getPresetFallbackAccessoryToonTexture(host)
+        : getPresetFallbackShadowToonTexture(host);
+    if (!fallbackTexture) return;
+
+    material.toonTexture = fallbackTexture;
+    if ("ignoreDiffuseWhenToonTextureIsNull" in material) {
+        material.ignoreDiffuseWhenToonTextureIsNull = true;
+    }
+}
+
+function ensurePresetFallbackToonTexture(host: any, material: any, kind: "shadow" | "accessory" = "shadow"): void {
+    if (!material || typeof material !== "object") return;
+    if (!("toonTexture" in material)) return;
+    if (material.toonTexture) return;
+
+    setPresetFallbackToonTexture(host, material, kind);
+}
+
+function ensureAccessoryPresetToonTexture(host: any, material: any): void {
+    if (!material || typeof material !== "object") return;
+    if (!("toonTexture" in material)) return;
+
+    const toonTextureName = typeof material.toonTexture?.name === "string"
+        ? material.toonTexture.name
+        : "";
+    if (material.toonTexture && toonTextureName !== "xAccessoryDefaultToon") {
+        return;
+    }
+
+    setPresetFallbackToonTexture(host, material, "accessory");
+}
+
+function applyAccessoryAmbientTuning(material: any, defaults: MaterialShaderDefaults): void {
+    if (!material || typeof material !== "object") return;
+    if (!("ambientColor" in material)) return;
+
+    const baseAmbient = defaults.ambientColor;
+    if (!baseAmbient) return;
+
+    const looksLikeLegacyXAmbient = baseAmbient.r >= 0.99
+        && baseAmbient.g >= 0.99
+        && baseAmbient.b >= 0.99;
+    if (!looksLikeLegacyXAmbient) return;
+
+    setMaterialColorProperty(material, "ambientColor", new Color3(0.22, 0.22, 0.22));
+}
+
 function collectLuminousMaterials(host: any): Set<object> {
     const luminousMaterials = new Set<object>();
     for (const entry of host.sceneModels ?? []) {
         for (const materialEntry of entry.materials ?? []) {
+            if (host.isMaterialVisible?.(materialEntry.material) === false) {
+                continue;
+            }
             if (getWgslMaterialShaderPresetForMaterial(host, materialEntry.material) !== "wgsl-autoluminous") {
                 continue;
             }
@@ -193,22 +1129,55 @@ export function syncLuminousGlowLayer(host: any): void {
         return;
     }
 
-    const manualGlow = Boolean(host.postEffectGlowEnabledValue);
+    const manualGlow = Boolean(host.postEffectGlowEnabledValue) && Number(host.postEffectGlowIntensityValue) > 1e-6;
+    const autoGlow = hasLuminousMaterials;
     const manualBloom = Boolean(host.postEffectBloomEnabledValue);
-    const shouldEnableBloom = manualBloom || hasLuminousMaterials;
+    const glowBaseIntensity = manualGlow
+        ? Number(host.postEffectGlowIntensityValue)
+        : Math.max(0.000001, Number(host.postEffectGlowIntensityValue) || 0.5);
+    const glowBaseKernel = Math.max(1, Math.round(Number(host.postEffectGlowKernelValue) || GlowLayer.DefaultBlurKernelSize));
 
-    pipeline.glowLayerEnabled = manualGlow;
-    const glowLayer = pipeline.glowLayer;
-    if (glowLayer) {
-        glowLayer.customEmissiveColorSelector = null;
-        glowLayer.customEmissiveTextureSelector = null;
-        if (manualGlow) {
-            glowLayer.intensity = host.postEffectGlowIntensityValue;
-            glowLayer.blurKernelSize = host.postEffectGlowKernelValue;
-        }
+    pipeline.glowLayerEnabled = false;
+    const haloGlowLayer = (manualGlow || autoGlow) ? ensureManagedLuminousGlowLayer(host, "halo") : null;
+    const coreGlowLayer = (manualGlow || autoGlow) ? ensureManagedLuminousGlowLayer(host, "core") : null;
+    if (haloGlowLayer || coreGlowLayer) {
+        const configureGlowLayer = (glowLayer: GlowLayer | null, kind: "core" | "halo"): void => {
+            if (!glowLayer) return;
+            glowLayer.customEmissiveColorSelector = null;
+            glowLayer.customEmissiveTextureSelector = null;
+            glowLayer.intensity = getManagedLuminousGlowIntensity(glowBaseIntensity, kind);
+            glowLayer.blurKernelSize = getManagedLuminousGlowKernel(glowBaseKernel, kind);
+            glowLayer.customEmissiveColorSelector = (mesh: any, _subMesh: any, material: any, result: any) => {
+                const glowState = getLuminousGlowMaterialState(host, material);
+                if (!glowState) {
+                    result.set(0, 0, 0, 0);
+                    return;
+                }
+                const morphScale = glowState.luminous ? getLuminousGlowMorphScaleForMesh(host, mesh) : 1;
+                if (glowState.luminous && morphScale <= 1e-4) {
+                    result.set(0, 0, 0, LUMINOUS_GLOW_OCCLUDER_ALPHA);
+                    return;
+                }
+                const glowColor = kind === "core" ? glowState.coreColor : glowState.haloColor;
+                const scaledGlowColor = glowState.luminous ? scaleColor(glowColor, morphScale) : glowColor;
+                result.set(
+                    scaledGlowColor.r,
+                    scaledGlowColor.g,
+                    scaledGlowColor.b,
+                    glowState.alpha,
+                );
+            };
+            glowLayer.customEmissiveTextureSelector = (_mesh: any, _subMesh: any, material: any) => {
+                return getLuminousGlowMaterialState(host, material)?.texture ?? null;
+            };
+        };
+        configureGlowLayer(haloGlowLayer, "halo");
+        configureGlowLayer(coreGlowLayer, "core");
+    } else {
+        disposeManagedLuminousGlowLayer(host);
     }
 
-    pipeline.bloomEnabled = shouldEnableBloom;
+    pipeline.bloomEnabled = manualBloom;
     const requestedBloomWeight = host.postEffectBloomWeightValue ?? 0;
     const requestedBloomThreshold = host.postEffectBloomThresholdValue ?? 2;
     const requestedBloomKernel = host.postEffectBloomKernelValue ?? 0;
@@ -217,11 +1186,6 @@ export function syncLuminousGlowLayer(host: any): void {
         pipeline.bloomWeight = requestedBloomWeight;
         pipeline.bloomThreshold = requestedBloomThreshold;
         pipeline.bloomKernel = requestedBloomKernel;
-    } else if (hasLuminousMaterials) {
-        // Keep the auto Luminous bloom selective so unrelated bright materials do not start glowing.
-        pipeline.bloomWeight = AUTO_LUMINOUS_BLOOM_WEIGHT;
-        pipeline.bloomThreshold = AUTO_LUMINOUS_BLOOM_THRESHOLD;
-        pipeline.bloomKernel = AUTO_LUMINOUS_BLOOM_KERNEL;
     } else {
         pipeline.bloomWeight = requestedBloomWeight;
         pipeline.bloomThreshold = requestedBloomThreshold;
@@ -238,6 +1202,7 @@ export function ensureMaterialShaderDefaults(host: any, material: any): Material
                 ? Number(material.specularPower)
                 : null,
             emissiveColor: cloneColor3OrNull(material.emissiveColor),
+            ambientColor: cloneColor3OrNull(material.ambientColor),
             transparencyMode: "transparencyMode" in material && typeof material.transparencyMode === "number"
                 ? material.transparencyMode
                 : null,
@@ -250,6 +1215,10 @@ export function ensureMaterialShaderDefaults(host: any, material: any): Material
                 : null,
             useAlphaFromAlbedoTexture: "useAlphaFromAlbedoTexture" in material
                 ? Boolean(material.useAlphaFromAlbedoTexture)
+                : null,
+            toonTexture: "toonTexture" in material ? (material.toonTexture ?? null) : undefined,
+            ignoreDiffuseWhenToonTextureIsNull: "ignoreDiffuseWhenToonTextureIsNull" in material
+                ? Boolean(material.ignoreDiffuseWhenToonTextureIsNull)
                 : null,
         };
         host.materialShaderDefaultsByMaterial.set(material as object, defaults);
@@ -289,10 +1258,24 @@ function restoreMaterialShaderDefaults(host: any, material: any, defaults: Mater
         material.useAlphaFromAlbedoTexture = defaults.useAlphaFromAlbedoTexture;
     }
 
+    if (defaults.toonTexture !== undefined && "toonTexture" in material) {
+        material.toonTexture = defaults.toonTexture;
+    }
+
+    if (defaults.ignoreDiffuseWhenToonTextureIsNull !== null && "ignoreDiffuseWhenToonTextureIsNull" in material) {
+        material.ignoreDiffuseWhenToonTextureIsNull = defaults.ignoreDiffuseWhenToonTextureIsNull;
+    }
+
     if (defaults.emissiveColor) {
         setMaterialColorProperty(material, "emissiveColor", defaults.emissiveColor);
     } else if ("emissiveColor" in material) {
         setMaterialColorProperty(material, "emissiveColor", new Color3(0, 0, 0));
+    }
+
+    if (defaults.ambientColor) {
+        setMaterialColorProperty(material, "ambientColor", defaults.ambientColor);
+    } else if ("ambientColor" in material) {
+        setMaterialColorProperty(material, "ambientColor", new Color3(0, 0, 0));
     }
 }
 
@@ -301,6 +1284,7 @@ function applyWgslShaderPresetToMaterial(host: any, material: any, presetId: Wgs
 
     const defaults = ensureMaterialShaderDefaults(host, material);
     restoreMaterialShaderDefaults(host, material, defaults);
+    setPresetWgslToonFragmentForMaterial(host, material, null);
 
     switch (presetId) {
         case "wgsl-unlit": {
@@ -382,7 +1366,7 @@ function applyWgslShaderPresetToMaterial(host: any, material: any, presetId: Wgs
             if ("disableLighting" in material) {
                 material.disableLighting = false;
             }
-            host.constructor.externalWgslToonFragmentByMaterial.set(material as object, debugWhiteWgslText);
+            setPresetWgslToonFragmentForMaterial(host, material, debugWhiteWgslText);
             break;
         }
         case "wgsl-full-light": {
@@ -410,7 +1394,8 @@ function applyWgslShaderPresetToMaterial(host: any, material: any, presetId: Wgs
                     Math.min(1, baseEmissive.b + diffuse.b * emissiveBoost),
                 ),
             );
-            host.constructor.externalWgslToonFragmentByMaterial.set(material as object, fullLightWgslText);
+            ensurePresetFallbackToonTexture(host, material);
+            setPresetWgslToonFragmentForMaterial(host, material, fullLightWgslText);
             break;
         }
         case "wgsl-full-light-add": {
@@ -438,7 +1423,7 @@ function applyWgslShaderPresetToMaterial(host: any, material: any, presetId: Wgs
                     Math.min(1, baseEmissive.b + diffuse.b * emissiveBoost),
                 ),
             );
-            host.constructor.externalWgslToonFragmentByMaterial.set(material as object, fullLightAddWgslText);
+            setPresetWgslToonFragmentForMaterial(host, material, fullLightAddWgslText);
             break;
         }
         case "wgsl-full-alpha-test": {
@@ -476,14 +1461,15 @@ function applyWgslShaderPresetToMaterial(host: any, material: any, presetId: Wgs
             if ("specularPower" in material) {
                 material.specularPower = 0;
             }
-            host.constructor.externalWgslToonFragmentByMaterial.set(material as object, fullShadowWgslText);
+            ensurePresetFallbackToonTexture(host, material);
+            setPresetWgslToonFragmentForMaterial(host, material, fullShadowWgslText);
             break;
         }
         case "wgsl-light-and-shadow": {
             if ("disableLighting" in material) {
                 material.disableLighting = false;
             }
-            host.constructor.externalWgslToonFragmentByMaterial.set(material as object, lightAndShadowWgslText);
+            ensurePresetFallbackToonTexture(host, material);
             break;
         }
         case "wgsl-gloss-highlight": {
@@ -494,7 +1480,7 @@ function applyWgslShaderPresetToMaterial(host: any, material: any, presetId: Wgs
                 const base = defaults.specularPower ?? 32;
                 material.specularPower = Math.min(768, Math.max(96, base * 3.1));
             }
-            host.constructor.externalWgslToonFragmentByMaterial.set(material as object, glossHighlightWgslText);
+            setPresetWgslToonFragmentForMaterial(host, material, glossHighlightWgslText);
             break;
         }
         case "wgsl-semi-matte-highlight": {
@@ -505,7 +1491,7 @@ function applyWgslShaderPresetToMaterial(host: any, material: any, presetId: Wgs
                 const base = defaults.specularPower ?? 32;
                 material.specularPower = Math.min(256, Math.max(28, base * 1.2));
             }
-            host.constructor.externalWgslToonFragmentByMaterial.set(material as object, semiMatteHighlightWgslText);
+            setPresetWgslToonFragmentForMaterial(host, material, semiMatteHighlightWgslText);
             break;
         }
         case "wgsl-matte-highlight": {
@@ -516,7 +1502,7 @@ function applyWgslShaderPresetToMaterial(host: any, material: any, presetId: Wgs
                 const base = defaults.specularPower ?? 32;
                 material.specularPower = Math.max(6, Math.min(48, base * 0.35));
             }
-            host.constructor.externalWgslToonFragmentByMaterial.set(material as object, matteHighlightWgslText);
+            setPresetWgslToonFragmentForMaterial(host, material, matteHighlightWgslText);
             break;
         }
         case "wgsl-specular": {
@@ -547,6 +1533,26 @@ function applyWgslShaderPresetToMaterial(host: any, material: any, presetId: Wgs
                     Math.min(1, baseEmissive.b + 0.015),
                 ),
             );
+            break;
+        }
+        case "wgsl-cel-shadow-sharp": {
+            if ("disableLighting" in material) {
+                material.disableLighting = false;
+            }
+            if ("specularPower" in material) {
+                const base = defaults.specularPower ?? 32;
+                material.specularPower = Math.max(4, base * 0.14);
+            }
+            ensurePresetFallbackToonTexture(host, material);
+            setPresetWgslToonFragmentForMaterial(host, material, toonHardShadowWgslText);
+            break;
+        }
+        case "wgsl-accessory-toon": {
+            if ("disableLighting" in material) {
+                material.disableLighting = false;
+            }
+            ensureAccessoryPresetToonTexture(host, material);
+            applyAccessoryAmbientTuning(material, defaults);
             break;
         }
         case "wgsl-rim-lift": {
@@ -737,6 +1743,34 @@ export function setWgslMaterialShaderPreset(
     return true;
 }
 
+export function applyWgslShaderPresetToMaterials(
+    host: any,
+    materials: Iterable<any>,
+    presetId: WgslMaterialShaderPresetId,
+): boolean {
+    if (!isWgslMaterialShaderAssignmentAvailable(host)) return false;
+    if (!getPresetCatalog(host).some((item) => item.id === presetId)) return false;
+
+    const seen = new Set<object>();
+    let applied = false;
+    for (const material of materials) {
+        const key = getMaterialKey(material);
+        if (!key || seen.has(key)) continue;
+        seen.add(key);
+
+        setExternalWgslToonShaderForMaterial(host, material, null, null);
+        applyWgslShaderPresetToMaterial(host, material, presetId);
+        applied = true;
+    }
+
+    if (!applied) return false;
+
+    syncLuminousGlowLayer(host);
+    host.engine.releaseEffects?.();
+    host.onMaterialShaderStateChanged?.();
+    return true;
+}
+
 export function getWgslModelShaderStates(host: any): Array<{
     modelIndex: number;
     modelName: string;
@@ -747,6 +1781,7 @@ export function getWgslModelShaderStates(host: any): Array<{
         name: string;
         presetId: WgslMaterialShaderPresetId;
         externalWgslPath: string | null;
+        visible: boolean;
     }>;
 }> {
     return host.sceneModels.map((entry: any, modelIndex: number) => ({
@@ -759,6 +1794,7 @@ export function getWgslModelShaderStates(host: any): Array<{
             name: material.name,
             presetId: getWgslMaterialShaderPresetForMaterial(host, material.material),
             externalWgslPath: getExternalWgslToonShaderPathForMaterial(host, material.material),
+            visible: host.isMaterialVisible?.(material.material) !== false,
         })),
     }));
 }

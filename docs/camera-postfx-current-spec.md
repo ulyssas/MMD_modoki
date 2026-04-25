@@ -1,12 +1,14 @@
 # Camera Post Effects Current Spec
 
-Updated: 2026-03-12
+Updated: 2026-04-23
 
 ## Summary
 
 Current camera-side post effects are edited from the right `エフェクト` panel when `対象 = Camera`.
 
 - Base image controls: `Gamma`, `Vignette`, `Chroma`, `Grain`, `Sharpen`, `Distortion`, `EdgeBlur`, `Edge`
+- `LuminousGlow`: intensity slider for `GlowLayer` based pseudo `AutoLuminous`
+- Material preset `Luminous` now routes into `LuminousGlow` instead of the old selective auto-bloom path
 - LUT: preset + intensity
 - Bloom: `On/Off`, `Bloom強度`, `BloomTh`, `BloomK`
 - DoF: `On/Off`, quality, focus, signed focus offset, F-stop, near suppression, focal invert, lens size, lens blur
@@ -21,7 +23,6 @@ The following items are intentionally hidden from the current UI:
 - `Exposure`
 - `Dither`
 - `Curves`
-- `Glow`
 - `Motion Blur`
 - `SSR`
 - `VLight`
@@ -41,7 +42,9 @@ Notes:
 - `前後補正` is a signed offset from the camera target.
 - Positive values move the focus nearer to the camera.
 - Negative values move the focus farther behind the target.
-- Lens blur remains a separate additive control and only has effect while DoF is enabled.
+- Main lens blur now uses a custom standalone round-bokeh path after fog/bloom.
+- Legacy `LensRenderingPipeline` based runtime remains disabled.
+- `Edge blur` now uses a standalone screen-edge blur pass.
 
 ## Fog Notes
 
@@ -71,3 +74,22 @@ Current project save/load persists these camera-side effect values:
 - LUT settings
 - Fog enabled / density / opacity / color
 
+## Final Post Process Order
+
+Current tail ordering after the main rendering pipeline is:
+
+- Fog
+- Bloom
+- Lens Blur
+- VLight
+- Motion Blur
+- Edge Blur
+- Lens Distortion
+- FXAA
+
+Notes:
+
+- This tail order is controlled by `enforceFinalPostProcessOrder()`.
+- Bloom is handled by a standalone `BloomEffect` pass so it can run after fog instead of inside `DefaultRenderingPipeline`.
+- Lens blur is also handled outside `DefaultRenderingPipeline` as a single standalone pass.
+- Edge blur is handled as a standalone radial screen-edge blur pass before final lens distortion.

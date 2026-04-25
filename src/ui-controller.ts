@@ -1,4 +1,4 @@
-import type { MmdManager, WgslMaterialShaderPresetId } from "./mmd-manager";
+import type { MmdManager } from "./mmd-manager";
 import type { Timeline } from "./timeline";
 import type { BottomPanel } from "./bottom-panel";
 import { applyI18nToDom, getLocale, setLocale, t } from "./i18n";
@@ -10,19 +10,30 @@ import type {
     MmdModokiProjectFileV1,
     ModelInfo,
     MotionInfo,
-    PngSequenceExportProgress,
-    PngSequenceExportState,
+    ProjectLightingState,
     ProjectOutputState,
+    TimelineRotationOverlay,
     UiLocale,
     TrackCategory,
     TimelineInterpolationPreview,
-    WebmExportProgress,
-    WebmExportState,
 } from "./types";
-import { normalizeLutFile } from "./lut-file";
+import { AccessoryPanelController } from "./ui/accessory-panel-controller";
+import { BloomToneMapController } from "./ui/bloom-tone-map-controller";
+import { CameraPanelController } from "./ui/camera-panel-controller";
+import { ColorPostFxController } from "./ui/color-postfx-controller";
+import { DofPanelController } from "./ui/dof-panel-controller";
+import { ExperimentalPostFxController } from "./ui/experimental-postfx-controller";
+import { ExportUiController } from "./ui/export-ui-controller";
+import { FogPanelController } from "./ui/fog-panel-controller";
+import { LayoutUiController } from "./ui/layout-ui-controller";
+import { LensEffectController } from "./ui/lens-effect-controller";
+import { LutPanelController } from "./ui/lut-panel-controller";
+import { ModelInfoPanelController, MODEL_INFO_CAMERA_SELECT_VALUE, type ModelInfoSelectState } from "./ui/model-info-panel-controller";
+import { ModelEdgeController } from "./ui/model-edge-controller";
+import { RuntimeFeatureUiController } from "./ui/runtime-feature-ui-controller";
+import { SceneEnvironmentUiController } from "./ui/scene-environment-ui-controller";
+import { ShaderPanelController } from "./ui/shader-panel-controller";
 
-type CameraViewPreset = "left" | "front" | "right" | "top" | "back" | "bottom";
-type AccessoryTransformSliderKey = "px" | "py" | "pz" | "rx" | "ry" | "rz" | "s";
 type SectionKeyframeButtonState = "none" | "dirty" | "registered";
 type SectionKeyframeSection = "info" | "interpolation" | "bone" | "morph" | "accessory";
 type NumericArrayLike = ArrayLike<number> | null | undefined;
@@ -33,7 +44,6 @@ type SelectedBonePoseSnapshot = {
     distance?: number;
     fov?: number;
 };
-type OutputSettings = { width: number; height: number; qualityScale: number; fps: number };
 
 type RuntimeMovableBoneTrackLike = {
     name: string;
@@ -125,6 +135,12 @@ type InterpolationDragState = {
     channelId: string;
     pointIndex: 1 | 2;
     changed: boolean;
+    dirtyMarked: boolean;
+};
+
+type InterpolationCurveClipboard = {
+    curves: InterpolationCurve[];
+    sourceChannelCount: number;
 };
 
 type MmdManagerInternalView = {
@@ -135,36 +151,11 @@ type MmdManagerInternalView = {
     cameraAnimationHandle: unknown | null;
 };
 
-type ImportedLutRegistryEntry = {
-    sourcePath: string;
-    displayName: string;
-    rawText: string;
-    runtimeText: string;
-    sourceFormat: "3dl" | "cube";
-};
-
 export class UIController {
-    private static readonly CAMERA_SELECT_VALUE = "__camera__";
     private static readonly DEBUG_KEYFRAME_FLOW = false;
-    private static readonly MIN_TIMELINE_WIDTH = 160;
-    private static readonly MIN_SHADER_PANEL_WIDTH = 220;
-    private static readonly MIN_VIEWPORT_WIDTH = 360;
-    private static readonly MIN_BOTTOM_PANEL_HEIGHT = 132;
-    private static readonly MIN_MAIN_CONTENT_HEIGHT = 220;
     private static readonly INTERP_CURVE_VIEWBOX_WIDTH = 120;
-    private static readonly INTERP_CURVE_VIEWBOX_HEIGHT = 90;
-    private static readonly EXTERNAL_WGSL_PRESET_PREFIX = "external-wgsl::";
-    private static readonly HIDDEN_SHADER_PRESET_IDS = new Set<WgslMaterialShaderPresetId>([
-        "wgsl-specular",
-        "wgsl-cel-sharp",
-        "wgsl-rim-lift",
-        "wgsl-mono-flat",
-        "wgsl-full-light-add",
-        "wgsl-full-alpha-test-hard",
-        "wgsl-white-key-cutout",
-        "wgsl-black-key-cutout",
-    ]);
-
+    private static readonly INTERP_CURVE_VIEWBOX_HEIGHT = 120;
+    private static readonly TIMELINE_WAVEFORM_FPS = 30;
     private mmdManager: MmdManager;
     private timeline: Timeline;
     private bottomPanel: BottomPanel;
@@ -176,117 +167,48 @@ export class UIController {
     private btnExportPng: HTMLElement;
     private btnExportPngSeq: HTMLElement | null = null;
     private btnExportWebm: HTMLElement | null = null;
-    private outputAspectSelect: HTMLSelectElement | null = null;
-    private outputSizePresetSelect: HTMLSelectElement | null = null;
-    private outputWidthInput: HTMLInputElement | null = null;
-    private outputHeightInput: HTMLInputElement | null = null;
-    private outputLockAspectInput: HTMLInputElement | null = null;
-    private outputQualitySelect: HTMLSelectElement | null = null;
-    private outputFpsSelect: HTMLSelectElement | null = null;
-    private outputWebmCodecSelect: HTMLSelectElement | null = null;
-    private outputIncludeAudioInput: HTMLInputElement | null = null;
-    private outputAspectRatio = 16 / 9;
-    private isSyncingOutputSettings = false;
-    private btnToggleGround: HTMLElement;
-    private groundToggleText: HTMLElement;
-    private btnToggleSkydome: HTMLElement;
-    private skydomeToggleText: HTMLElement;
-    private btnTogglePhysics: HTMLElement;
-    private physicsToggleText: HTMLElement;
-    private btnToggleShadow: HTMLElement;
-    private shadowToggleText: HTMLElement;
-    private btnToggleRigidBodies: HTMLElement;
-    private rigidBodiesToggleText: HTMLElement;
-    private btnToggleGi: HTMLElement;
-    private giToggleText: HTMLElement;
     private toolbarLocaleSelect: HTMLSelectElement | null = null;
-    private btnToggleShaderPanel: HTMLButtonElement | null = null;
-    private shaderPanelToggleText: HTMLElement | null = null;
-    private btnToggleFullscreenUi: HTMLButtonElement | null = null;
-    private fullscreenUiToggleText: HTMLElement | null = null;
     private btnPlay: HTMLElement;
     private btnPause: HTMLElement;
-    private btnStop: HTMLElement;
+    private btnStop: HTMLElement | null;
     private btnSkipStart: HTMLElement;
     private btnSkipEnd: HTMLElement;
-    private currentFrameEl: HTMLElement;
+    private currentFrameEl: HTMLInputElement;
     private totalFramesEl: HTMLElement;
     private statusText: HTMLElement;
     private statusDot: HTMLElement;
     private viewportOverlay: HTMLElement;
-    private viewportContainerEl: HTMLElement | null = null;
-    private renderCanvasEl: HTMLCanvasElement | null = null;
-    private viewportAspectResizeObserver: ResizeObserver | null = null;
     private btnKeyframeAdd: HTMLButtonElement;
     private btnKeyframeDelete: HTMLButtonElement;
     private btnKeyframeNudgeLeft: HTMLButtonElement;
     private btnKeyframeNudgeRight: HTMLButtonElement;
-    private timelineSelectionLabel: HTMLElement;
+    private btnFrameStepLeft: HTMLButtonElement;
+    private btnFrameStepRight: HTMLButtonElement;
+    private btnFrameRangeStart: HTMLButtonElement;
+    private btnFrameRangeEnd: HTMLButtonElement;
+    private timelineSelectionLabel: HTMLElement | null;
     private interpolationTrackNameLabel: HTMLElement;
     private interpolationFrameLabel: HTMLElement;
     private interpolationTypeSelect: HTMLSelectElement;
     private interpolationStatusLabel: HTMLElement;
     private interpolationCurveList: HTMLElement;
-    private modelSelect: HTMLSelectElement;
-    private btnModelVisibility: HTMLButtonElement;
-    private btnModelDelete: HTMLButtonElement;
+    private btnInterpolationCopy: HTMLButtonElement | null = null;
+    private btnInterpolationPaste: HTMLButtonElement | null = null;
+    private btnInterpolationLinear: HTMLButtonElement | null = null;
     private shaderModelSelect: HTMLSelectElement | null = null;
     private shaderPresetSelect: HTMLSelectElement | null = null;
-    private shaderApplyButton: HTMLButtonElement | null = null;
+    private shaderApplySelectedButton: HTMLButtonElement | null = null;
+    private shaderApplyAllButton: HTMLButtonElement | null = null;
     private shaderResetButton: HTMLButtonElement | null = null;
     private shaderPanelNote: HTMLElement | null = null;
     private shaderMaterialList: HTMLElement | null = null;
-    private readonly shaderSelectedMaterialKeys = new Map<number, string>();
-    private mainContentEl: HTMLElement;
-    private timelinePanelEl: HTMLElement | null = null;
-    private timelineResizerEl: HTMLElement | null = null;
-    private shaderResizerEl: HTMLElement | null = null;
-    private shaderPanelEl: HTMLElement | null = null;
-    private bottomPanelEl: HTMLElement | null = null;
-    private bottomPanelResizerEl: HTMLElement | null = null;
-    private isTimelineResizing = false;
-    private isShaderResizing = false;
-    private isBottomPanelResizing = false;
-    private camDistanceSlider: HTMLInputElement | null = null;
-    private camDistanceValueEl: HTMLElement | null = null;
-    private cameraControlsEl: HTMLElement | null = null;
-    private cameraDofControlsEl: HTMLElement | null = null;
-    private camViewLeftBtn: HTMLButtonElement | null = null;
-    private camViewFrontBtn: HTMLButtonElement | null = null;
-    private camViewRightBtn: HTMLButtonElement | null = null;
-    private camViewTopBtn: HTMLButtonElement | null = null;
-    private camViewBackBtn: HTMLButtonElement | null = null;
-    private camViewBottomBtn: HTMLButtonElement | null = null;
     private btnInfoKeyframe: HTMLButtonElement | null = null;
     private btnInterpolationKeyframe: HTMLButtonElement | null = null;
     private btnBoneKeyframe: HTMLButtonElement | null = null;
     private btnMorphKeyframe: HTMLButtonElement | null = null;
     private btnAccessoryKeyframe: HTMLButtonElement | null = null;
-    private physicsGravityAccelSlider: HTMLInputElement | null = null;
-    private physicsGravityDirXSlider: HTMLInputElement | null = null;
-    private physicsGravityDirYSlider: HTMLInputElement | null = null;
-    private physicsGravityDirZSlider: HTMLInputElement | null = null;
-    private physicsSimulationRateSelect: HTMLSelectElement | null = null;
-    private physicsSimulationRateValueEl: HTMLElement | null = null;
-    private dofFocusSlider: HTMLInputElement | null = null;
-    private dofFocusValueEl: HTMLElement | null = null;
-    private dofFStopValueEl: HTMLElement | null = null;
-    private dofFocalLengthSlider: HTMLInputElement | null = null;
-    private dofFocalLengthValueEl: HTMLElement | null = null;
-    private lensDistortionSlider: HTMLInputElement | null = null;
-    private lensDistortionValueEl: HTMLElement | null = null;
     private shortcutEdgeWidthRestore = 1;
-    private accessorySelect: HTMLSelectElement | null = null;
-    private accessoryParentModelSelect: HTMLSelectElement | null = null;
-    private accessoryParentBoneSelect: HTMLSelectElement | null = null;
-    private btnAccessoryVisibility: HTMLButtonElement | null = null;
-    private btnAccessoryDelete: HTMLButtonElement | null = null;
-    private accessoryEmptyStateEl: HTMLElement | null = null;
-    private readonly accessoryTransformSliders = new Map<AccessoryTransformSliderKey, HTMLInputElement>();
-    private readonly accessoryTransformValueEls = new Map<AccessoryTransformSliderKey, HTMLElement>();
     private readonly rangeNumberInputs = new WeakMap<HTMLInputElement, HTMLInputElement>();
-    private isSyncingAccessoryUi = false;
-    private isSyncingAccessoryParentUi = false;
     private syncingBoneSelection = false;
     private selectedBoneTrackCategory: TrackCategory | null = null;
     private readonly sectionKeyframeDirtyKeys: Record<SectionKeyframeSection, Set<string>> = {
@@ -299,37 +221,32 @@ export class UIController {
     private readonly pendingBonePoseSnapshots = new Map<string, { frame: number; snapshot: SelectedBonePoseSnapshot }>();
     private readonly interpolationChannelBindings = new Map<string, InterpolationChannelBinding>();
     private interpolationDragState: InterpolationDragState | null = null;
+    private currentInterpolationPreview: TimelineInterpolationPreview | null = null;
+    private interpolationCurveClipboard: InterpolationCurveClipboard | null = null;
+    private timelineWaveformRequestId = 0;
     private lastObservedFrame: number | null = null;
-    private appRootEl: HTMLElement;
-    private busyOverlayEl: HTMLElement | null = null;
-    private busyTextEl: HTMLElement | null = null;
-    private pngSequenceExportStateUnsubscribe: (() => void) | null = null;
-    private pngSequenceExportProgressUnsubscribe: (() => void) | null = null;
-    private webmExportStateUnsubscribe: (() => void) | null = null;
-    private webmExportProgressUnsubscribe: (() => void) | null = null;
-    private isPngSequenceExportActive = false;
-    private pngSequenceExportActiveCount = 0;
-    private latestPngSequenceExportProgress: PngSequenceExportProgress | null = null;
-    private isWebmExportActive = false;
-    private webmExportActiveCount = 0;
-    private latestWebmExportProgress: WebmExportProgress | null = null;
-    private backgroundExportMonitorIntervalId: number | null = null;
-    private isUiFullscreenActive = false;
-    private postFxLutExternalPath: string | null = null;
-    private postFxLutExternalText: string | null = null;
-    private postFxLutExternalRuntimeText: string | null = null;
-    private readonly customLutEntriesByPath = new Map<string, ImportedLutRegistryEntry>();
+    private accessoryPanelController: AccessoryPanelController | null = null;
+    private bloomToneMapController: BloomToneMapController | null = null;
+    private cameraPanelController: CameraPanelController | null = null;
+    private colorPostFxController: ColorPostFxController | null = null;
+    private dofPanelController: DofPanelController | null = null;
+    private experimentalPostFxController: ExperimentalPostFxController | null = null;
+    private exportUiController: ExportUiController | null = null;
+    private fogPanelController: FogPanelController | null = null;
+    private layoutUiController: LayoutUiController | null = null;
+    private lensEffectController: LensEffectController | null = null;
+    private lutPanelController: LutPanelController | null = null;
+    private modelEdgeController: ModelEdgeController | null = null;
+    private modelInfoPanelController: ModelInfoPanelController | null = null;
+    private runtimeFeatureUiController: RuntimeFeatureUiController | null = null;
+    private sceneEnvironmentUiController: SceneEnvironmentUiController | null = null;
+    private shaderPanelController: ShaderPanelController | null = null;
     private postFxWgslToonPath: string | null = null;
     private postFxWgslToonText: string | null = null;
     private currentProjectFilePath: string | null = null;
-    private bundledWgslShaderFiles: { name: string; path: string }[] = [];
-    private bundledWgslScanInFlight = false;
-    private bundledWgslLastScanMs = 0;
-    private refreshAaToggleUi: (() => void) | null = null;
-    private refreshShadowToggleUi: (() => void) | null = null;
-    private refreshGiToggleUi: (() => void) | null = null;
     private readonly onLocaleChanged = (): void => {
         this.applyLocalizedUiState();
+        this.dofPanelController?.refreshFocusTargetControls();
         this.refreshShaderPanel();
     };
 
@@ -356,114 +273,175 @@ export class UIController {
         this.btnExportPng = document.getElementById("btn-export-png")!;
         this.btnExportPngSeq = document.getElementById("btn-export-png-seq");
         this.btnExportWebm = document.getElementById("btn-export-webm");
-        this.outputAspectSelect = document.getElementById("output-aspect") as HTMLSelectElement | null;
-        this.outputSizePresetSelect = document.getElementById("output-size-preset") as HTMLSelectElement | null;
-        this.outputWidthInput = document.getElementById("output-width") as HTMLInputElement | null;
-        this.outputHeightInput = document.getElementById("output-height") as HTMLInputElement | null;
-        this.outputLockAspectInput = document.getElementById("output-lock-aspect") as HTMLInputElement | null;
-        this.outputQualitySelect = document.getElementById("output-quality") as HTMLSelectElement | null;
-        this.outputFpsSelect = document.getElementById("output-fps") as HTMLSelectElement | null;
-        this.outputWebmCodecSelect = document.getElementById("output-webm-codec") as HTMLSelectElement | null;
-        this.outputIncludeAudioInput = document.getElementById("output-include-audio") as HTMLInputElement | null;
-        this.btnToggleGround = document.getElementById("btn-toggle-ground")!;
-        this.groundToggleText = document.getElementById("ground-toggle-text")!;
-        this.btnToggleSkydome = document.getElementById("btn-toggle-skydome")!;
-        this.skydomeToggleText = document.getElementById("skydome-toggle-text")!;
-        this.btnTogglePhysics = document.getElementById("btn-toggle-physics")!;
-        this.physicsToggleText = document.getElementById("physics-toggle-text")!;
-        this.btnToggleShadow = document.getElementById("btn-toggle-shadow")!;
-        this.shadowToggleText = document.getElementById("shadow-toggle-text")!;
-        this.btnToggleRigidBodies = document.getElementById("btn-toggle-rigid-bodies")!;
-        this.rigidBodiesToggleText = document.getElementById("rigid-bodies-toggle-text")!;
-        this.btnToggleGi = document.getElementById("btn-toggle-gi")!;
-        this.giToggleText = document.getElementById("gi-toggle-text")!;
         this.toolbarLocaleSelect = document.getElementById("toolbar-locale-select") as HTMLSelectElement | null;
-        this.btnToggleShaderPanel = document.getElementById("btn-toggle-shader-panel") as HTMLButtonElement | null;
-        this.shaderPanelToggleText = document.getElementById("shader-panel-toggle-text");
-        this.btnToggleFullscreenUi = document.getElementById("btn-toggle-fullscreen-ui") as HTMLButtonElement | null;
-        this.fullscreenUiToggleText = document.getElementById("fullscreen-ui-toggle-text");
         this.btnPlay = document.getElementById("btn-play")!;
         this.btnPause = document.getElementById("btn-pause")!;
-        this.btnStop = document.getElementById("btn-stop")!;
+        this.btnStop = document.getElementById("btn-stop");
         this.btnSkipStart = document.getElementById("btn-skip-start")!;
         this.btnSkipEnd = document.getElementById("btn-skip-end")!;
-        this.currentFrameEl = document.getElementById("current-frame")!;
+        this.currentFrameEl = document.getElementById("current-frame") as HTMLInputElement;
         this.totalFramesEl = document.getElementById("total-frames")!;
         this.statusText = document.getElementById("status-text")!;
         this.statusDot = document.querySelector(".status-dot")!;
         this.viewportOverlay = document.getElementById("viewport-overlay")!;
-        this.viewportContainerEl = document.getElementById("viewport-container");
-        this.renderCanvasEl = document.getElementById("render-canvas") as HTMLCanvasElement | null;
         this.btnKeyframeAdd = document.getElementById("btn-kf-add") as HTMLButtonElement;
         this.btnKeyframeDelete = document.getElementById("btn-kf-delete") as HTMLButtonElement;
         this.btnKeyframeNudgeLeft = document.getElementById("btn-kf-nudge-left") as HTMLButtonElement;
         this.btnKeyframeNudgeRight = document.getElementById("btn-kf-nudge-right") as HTMLButtonElement;
-        this.timelineSelectionLabel = document.getElementById("timeline-selection-label")!;
+        this.btnFrameStepLeft = document.getElementById("btn-frame-step-left") as HTMLButtonElement;
+        this.btnFrameStepRight = document.getElementById("btn-frame-step-right") as HTMLButtonElement;
+        this.btnFrameRangeStart = document.getElementById("btn-frame-range-start") as HTMLButtonElement;
+        this.btnFrameRangeEnd = document.getElementById("btn-frame-range-end") as HTMLButtonElement;
+        this.timelineSelectionLabel = document.getElementById("timeline-selection-label");
         this.interpolationTrackNameLabel = document.getElementById("interp-track-name")!;
         this.interpolationFrameLabel = document.getElementById("interp-frame")!;
         this.interpolationTypeSelect = document.getElementById("interp-type") as HTMLSelectElement;
         this.interpolationStatusLabel = document.getElementById("interp-status")!;
         this.interpolationCurveList = document.getElementById("interp-curve-list")!;
-        this.modelSelect = document.getElementById("info-model-select") as HTMLSelectElement;
-        this.btnModelVisibility = document.getElementById("btn-model-visibility") as HTMLButtonElement;
-        this.btnModelDelete = document.getElementById("btn-model-delete") as HTMLButtonElement;
+        this.btnInterpolationCopy = document.getElementById("btn-interp-copy") as HTMLButtonElement | null;
+        this.btnInterpolationPaste = document.getElementById("btn-interp-paste") as HTMLButtonElement | null;
+        this.btnInterpolationLinear = document.getElementById("btn-interp-linear") as HTMLButtonElement | null;
         this.shaderModelSelect = document.getElementById("shader-model-select") as HTMLSelectElement | null;
         this.shaderPresetSelect = document.getElementById("shader-preset-select") as HTMLSelectElement | null;
-        this.shaderApplyButton = document.getElementById("btn-shader-apply") as HTMLButtonElement | null;
+        this.shaderApplySelectedButton = document.getElementById("btn-shader-apply-selected") as HTMLButtonElement | null;
+        this.shaderApplyAllButton = document.getElementById("btn-shader-apply-all") as HTMLButtonElement | null;
         this.shaderResetButton = document.getElementById("btn-shader-reset") as HTMLButtonElement | null;
         this.shaderPanelNote = document.getElementById("shader-panel-note");
         this.shaderMaterialList = document.getElementById("shader-material-list");
-        this.accessorySelect = document.getElementById("accessory-select") as HTMLSelectElement | null;
-        this.accessoryParentModelSelect = document.getElementById("accessory-parent-model") as HTMLSelectElement | null;
-        this.accessoryParentBoneSelect = document.getElementById("accessory-parent-bone") as HTMLSelectElement | null;
-        this.btnAccessoryVisibility = document.getElementById("btn-accessory-visibility") as HTMLButtonElement | null;
-        this.btnAccessoryDelete = document.getElementById("btn-accessory-delete") as HTMLButtonElement | null;
-        this.accessoryEmptyStateEl = document.getElementById("accessory-empty-state");
-        this.appRootEl = document.getElementById("app") as HTMLElement;
-        this.busyOverlayEl = document.getElementById("ui-busy-overlay");
-        this.busyTextEl = document.getElementById("ui-busy-text");
-        this.mainContentEl = document.getElementById("main-content") as HTMLElement;
-        this.timelinePanelEl = document.getElementById("timeline-panel");
-        this.timelineResizerEl = document.getElementById("timeline-resizer");
-        this.shaderResizerEl = document.getElementById("shader-resizer");
-        this.shaderPanelEl = document.getElementById("shader-panel");
-        this.bottomPanelEl = document.getElementById("bottom-panel");
-        this.bottomPanelResizerEl = document.getElementById("bottom-panel-resizer");
-        this.cameraControlsEl = document.getElementById("camera-controls");
-        this.cameraDofControlsEl = document.getElementById("camera-dof-controls");
 
+        this.modelEdgeController = new ModelEdgeController({
+            mmdManager: this.mmdManager,
+            syncRangeNumberInput: (slider) => this.syncRangeNumberInput(slider),
+        });
+        this.lensEffectController = new LensEffectController({
+            mmdManager: this.mmdManager,
+            syncRangeNumberInput: (slider) => this.syncRangeNumberInput(slider),
+            isRangeInputEditing: (slider) => this.isRangeInputEditing(slider),
+        });
+        this.fogPanelController = new FogPanelController({
+            mmdManager: this.mmdManager,
+            syncRangeNumberInput: (slider) => this.syncRangeNumberInput(slider),
+            normalizeRangeInputValue: (slider, value) => this.normalizeRangeInputValue(slider, value),
+            formatRangeInputValue: (slider, value) => this.formatRangeInputValue(slider, value),
+        });
+        this.modelInfoPanelController = new ModelInfoPanelController({
+            mmdManager: this.mmdManager,
+            showToast: (message, type) => this.showToast(message, type),
+            onTargetSelected: (value, showToast) => this.handleModelTargetSelection(value, showToast),
+            onModelVisibilityChanged: () => {
+                this.markSectionKeyframeDirty("info", this.getInfoKeyframeContextKey());
+                this.runtimeFeatureUiController?.refreshRigidBodies();
+                this.updateSectionKeyframeButtons();
+            },
+            onModelDeleted: (hasRemainingModels) => {
+                if (!hasRemainingModels) {
+                    this.mmdManager.setTimelineTarget("camera");
+                    this.applyCameraSelectionUI();
+                } else {
+                    this.applyActiveModelSelectionUI();
+                }
+                this.refreshModelSelector();
+                this.refreshShaderPanel();
+            },
+        });
+        this.cameraPanelController = new CameraPanelController({
+            mmdManager: this.mmdManager,
+            syncRangeNumberInput: (slider) => this.syncRangeNumberInput(slider),
+            normalizeRangeInputValue: (slider, value) => this.normalizeRangeInputValue(slider, value),
+            formatRangeInputValue: (slider, value) => this.formatRangeInputValue(slider, value),
+            isRangeInputEditing: (slider) => this.isRangeInputEditing(slider),
+            onCameraEdited: () => this.handleCameraControlEdited(),
+        });
         this.setupEventListeners();
         this.setupCallbacks();
         this.setupKeyboard();
         this.setupFileDrop();
-        this.setupPngSequenceExportStateBridge();
-        this.setupWebmExportStateBridge();
-        this.startBackgroundExportMonitor();
+        this.exportUiController = new ExportUiController({
+            mmdManager: this.mmdManager,
+            buildProjectState: () => this.buildProjectStateForPersistence(),
+            setStatus: (text, loading) => this.setStatus(text, loading),
+            showToast: (message, type) => this.showToast(message, type),
+            isPlaybackActive: () => this.mmdManager.isPlaying,
+            onPausePlayback: () => this.pause(false),
+            getViewportSize: () => ({
+                width: document.getElementById("viewport-container")?.clientWidth ?? 0,
+                height: document.getElementById("viewport-container")?.clientHeight ?? 0,
+            }),
+            onOutputAspectChanged: () => {
+                this.layoutUiController?.applyViewportAspectPresentation();
+                this.layoutUiController?.syncMainWindowPresentationAspect();
+            },
+        });
+        this.layoutUiController = new LayoutUiController({
+            mmdManager: this.mmdManager,
+            exportUiController: this.exportUiController,
+            showToast: (message, type) => this.showToast(message, type),
+        });
+        this.sceneEnvironmentUiController = new SceneEnvironmentUiController({
+            mmdManager: this.mmdManager,
+            setStatus: (text, loading) => this.setStatus(text, loading),
+            showToast: (message, type) => this.showToast(message, type),
+        });
+        this.runtimeFeatureUiController = new RuntimeFeatureUiController({
+            mmdManager: this.mmdManager,
+            showToast: (message, type) => this.showToast(message, type),
+        });
+        this.accessoryPanelController = new AccessoryPanelController({
+            mmdManager: this.mmdManager,
+            showToast: (message, type) => this.showToast(message, type),
+            syncRangeNumberInput: (slider) => this.syncRangeNumberInput(slider),
+            onAccessoryTransformChanged: (accessoryIndex) => {
+                this.markSectionKeyframeDirty("accessory", this.getAccessoryKeyframeContextKey(accessoryIndex));
+                this.updateSectionKeyframeButtons();
+            },
+            onSelectionChanged: () => this.updateSectionKeyframeButtons(),
+        });
+        this.colorPostFxController = new ColorPostFxController({
+            mmdManager: this.mmdManager,
+        });
+        this.bloomToneMapController = new BloomToneMapController({
+            mmdManager: this.mmdManager,
+        });
+        this.experimentalPostFxController = new ExperimentalPostFxController({
+            mmdManager: this.mmdManager,
+        });
+        this.dofPanelController = new DofPanelController({
+            mmdManager: this.mmdManager,
+            syncRangeNumberInput: (slider) => this.syncRangeNumberInput(slider),
+            isRangeInputEditing: (slider) => this.isRangeInputEditing(slider),
+        });
+        this.lutPanelController = new LutPanelController({
+            mmdManager: this.mmdManager,
+            getBaseNameForRenderer: (filePath) => this.getBaseNameForRenderer(filePath),
+            setStatus: (text, loading) => this.setStatus(text, loading),
+            showToast: (message, type) => this.showToast(message, type),
+            refreshShaderPanel: () => this.refreshShaderPanel(),
+        });
+        this.shaderPanelController = new ShaderPanelController({
+            mmdManager: this.mmdManager,
+            getInfoModelSelectState: () => this.getInfoModelSelectState(),
+            onModelTargetSelected: (value, showToast) => this.handleModelTargetSelection(value, showToast),
+            renderCameraPostEffectsPanel: () => this.renderShaderCameraPostEffectsPanel(),
+            restoreCameraDofControlsToCameraPanel: () => this.dofPanelController?.restoreControlsToCameraPanel(),
+            getBaseNameForRenderer: (filePath) => this.getBaseNameForRenderer(filePath),
+            showToast: (message, type) => this.showToast(message, type),
+            onExternalWgslToonChanged: (path, text) => {
+                this.postFxWgslToonPath = path;
+                this.postFxWgslToonText = text;
+            },
+        });
         this.setupPerfDisplay();
         this.showStartupRenderingDiagnostics();
-        this.setupViewportAspectSync();
         this.refreshModelSelector();
-        this.refreshAccessoryPanel();
-        this.updateGroundToggleButton(this.mmdManager.isGroundVisible());
-        this.updateSkydomeToggleButton(this.mmdManager.isSkydomeVisible());
-        this.updatePhysicsToggleButton(
-            this.mmdManager.getPhysicsEnabled(),
-            this.mmdManager.isPhysicsAvailable()
-        );
-        this.updateShadowToggleButton();
-        this.updateRigidBodyToggleButton();
-        this.updateGiToggleButton();
+        this.accessoryPanelController?.refresh();
+        this.sceneEnvironmentUiController?.refresh();
+        this.runtimeFeatureUiController?.refresh();
         this.updateInfoActionButtons();
-        this.updateShaderPanelToggleButton(this.isShaderPanelExpanded());
-        this.updateFullscreenUiToggleButton(false);
-        this.setupTimelineResizer();
-        this.setupShaderResizer();
-        this.setupBottomPanelResizer();
-        this.clampBottomPanelHeightToLayout();
         this.refreshShaderPanel();
         this.installRangeNumberInputs();
-        void this.reloadBundledWgslShaderFiles();
+        void this.shaderPanelController.reloadBundledWgslShaderFiles();
         this.updateTimelineEditState();
+        this.timeline.setWaveformPeaks(null);
         this.shortcutEdgeWidthRestore = Math.max(0.01, this.mmdManager.modelEdgeWidth || 1);
         this.applyLocalizedUiState();
         document.addEventListener("app:locale-changed", this.onLocaleChanged as EventListener);
@@ -474,20 +452,8 @@ export class UIController {
                 event.returnValue = "";
                 return;
             }
-            this.pngSequenceExportStateUnsubscribe?.();
-            this.pngSequenceExportStateUnsubscribe = null;
-            this.pngSequenceExportProgressUnsubscribe?.();
-            this.pngSequenceExportProgressUnsubscribe = null;
-            this.webmExportStateUnsubscribe?.();
-            this.webmExportStateUnsubscribe = null;
-            this.webmExportProgressUnsubscribe?.();
-            this.webmExportProgressUnsubscribe = null;
-            if (this.backgroundExportMonitorIntervalId !== null) {
-                window.clearInterval(this.backgroundExportMonitorIntervalId);
-                this.backgroundExportMonitorIntervalId = null;
-            }
-            this.viewportAspectResizeObserver?.disconnect();
-            this.viewportAspectResizeObserver = null;
+            this.exportUiController?.dispose();
+            this.layoutUiController?.dispose();
             document.removeEventListener("app:locale-changed", this.onLocaleChanged as EventListener);
         });
     }
@@ -499,96 +465,19 @@ export class UIController {
         });
         this.btnSaveProject.addEventListener("click", () => this.saveProject(true));
         this.btnLoadProject.addEventListener("click", () => this.loadProject());
-        this.btnExportPng.addEventListener("click", () => this.exportPNG());
+        this.btnExportPng.addEventListener("click", () => {
+            void this.exportUiController?.exportPNG();
+        });
         this.btnExportPngSeq?.addEventListener("click", () => {
-            void this.exportPNGSequence();
+            void this.exportUiController?.exportPNGSequence();
         });
         this.btnExportWebm?.addEventListener("click", () => {
-            void this.exportWebm();
+            void this.exportUiController?.exportWebm();
         });
-        this.setupOutputControls();
         this.interpolationTypeSelect.addEventListener("change", () => this.updateTimelineEditState());
-        this.btnToggleGround.addEventListener("click", () => {
-            const visible = this.mmdManager.toggleGroundVisible();
-            this.updateGroundToggleButton(visible);
-            this.showToast(visible ? t("toast.ground.on") : t("toast.ground.off"), "info");
-        });
-        this.btnToggleSkydome.addEventListener("click", () => {
-            const visible = this.mmdManager.toggleSkydomeVisible();
-            this.updateSkydomeToggleButton(visible);
-            this.showToast(visible ? t("toast.sky.on") : t("toast.sky.off"), "info");
-        });
-        const btnToggleAa = document.getElementById("btn-toggle-aa") as HTMLButtonElement | null;
-        const aaToggleText = document.getElementById("aa-toggle-text");
-        if (btnToggleAa && aaToggleText) {
-            const updateAaButton = () => {
-                const enabled = this.mmdManager.antialiasEnabled;
-                aaToggleText.textContent = t("toolbar.aa.short");
-                btnToggleAa.setAttribute("aria-pressed", enabled ? "true" : "false");
-                btnToggleAa.classList.toggle("toggle-on", enabled);
-                btnToggleAa.title = enabled
-                    ? t("toolbar.aa.title.on")
-                    : t("toolbar.aa.title.off");
-            };
-            this.refreshAaToggleUi = updateAaButton;
-            updateAaButton();
-            btnToggleAa.addEventListener("click", () => {
-                this.mmdManager.antialiasEnabled = !this.mmdManager.antialiasEnabled;
-                updateAaButton();
-                this.showToast(this.mmdManager.antialiasEnabled ? t("toast.aa.on") : t("toast.aa.off"), "info");
-            });
-        }
-        this.btnTogglePhysics.addEventListener("click", () => {
-            if (!this.mmdManager.isPhysicsAvailable()) {
-                this.updatePhysicsToggleButton(false, false);
-                this.showToast(t("toast.physics.unavailable"), "error");
-                return;
-            }
-
-            const enabled = this.mmdManager.togglePhysicsEnabled();
-            this.updatePhysicsToggleButton(enabled, true);
-            this.showToast(enabled ? t("toast.physics.on") : t("toast.physics.off"), "info");
-        });
-        this.btnToggleShadow.addEventListener("click", () => {
-            const enabled = !this.mmdManager.getShadowEnabled();
-            this.mmdManager.setShadowEnabled(enabled);
-            this.updateShadowToggleButton();
-            this.showToast(enabled ? t("toast.shadow.on") : t("toast.shadow.off"), "info");
-        });
-        this.btnToggleRigidBodies.addEventListener("click", () => {
-            if (!this.mmdManager.isRigidBodyVisualizerAvailable()) {
-                this.updateRigidBodyToggleButton();
-                this.showToast(t("toast.rigidBodies.unavailable"), "error");
-                return;
-            }
-
-            const enabled = this.mmdManager.toggleRigidBodyVisualizerEnabled();
-            this.updateRigidBodyToggleButton();
-            this.showToast(enabled ? t("toast.rigidBodies.on") : t("toast.rigidBodies.off"), "info");
-        });
-        this.btnToggleGi.addEventListener("click", () => {
-            const wasEnabled = this.mmdManager.isGlobalIlluminationEnabled();
-            const enabled = this.mmdManager.toggleGlobalIlluminationEnabled();
-            this.updateGiToggleButton();
-            this.showToast(
-                this.mmdManager.isGlobalIlluminationPending()
-                    ? t("toast.gi.loading")
-                    : !wasEnabled && !enabled
-                    ? t("toast.gi.unavailable")
-                    : enabled
-                        ? t("toast.gi.on")
-                        : t("toast.gi.off"),
-                this.mmdManager.isGlobalIlluminationPending() || (!wasEnabled && !enabled) ? "info" : "info",
-            );
-        });
-        this.btnToggleShaderPanel?.addEventListener("click", () => {
-            const nextVisible = !this.isShaderPanelExpanded();
-            this.setShaderPanelVisible(nextVisible);
-            this.showToast(nextVisible ? t("toast.fx.shown") : t("toast.fx.hidden"), "info");
-        });
-        this.btnToggleFullscreenUi?.addEventListener("click", () => {
-            this.toggleUiFullscreenMode();
-        });
+        this.btnInterpolationCopy?.addEventListener("click", () => this.copyInterpolationCurves());
+        this.btnInterpolationPaste?.addEventListener("click", () => this.pasteInterpolationCurves());
+        this.btnInterpolationLinear?.addEventListener("click", () => this.resetInterpolationCurvesToLinear());
         this.toolbarLocaleSelect?.addEventListener("change", () => {
             const nextLocale = this.getSelectedToolbarLocale();
             if (!nextLocale || nextLocale === getLocale()) {
@@ -597,129 +486,36 @@ export class UIController {
             }
             setLocale(nextLocale);
         });
-        const physicsGravityAccel = document.getElementById("physics-gravity-accel") as HTMLInputElement | null;
-        const physicsGravityAccelVal = document.getElementById("physics-gravity-accel-val");
-        const physicsGravityDirX = document.getElementById("physics-gravity-dir-x") as HTMLInputElement | null;
-        const physicsGravityDirXVal = document.getElementById("physics-gravity-dir-x-val");
-        const physicsGravityDirY = document.getElementById("physics-gravity-dir-y") as HTMLInputElement | null;
-        const physicsGravityDirYVal = document.getElementById("physics-gravity-dir-y-val");
-        const physicsGravityDirZ = document.getElementById("physics-gravity-dir-z") as HTMLInputElement | null;
-        const physicsGravityDirZVal = document.getElementById("physics-gravity-dir-z-val");
-        const physicsSimulationRate = document.getElementById("physics-step-rate") as HTMLSelectElement | null;
-        const physicsSimulationRateVal = document.getElementById("physics-step-rate-val");
-        this.physicsGravityAccelSlider = physicsGravityAccel;
-        this.physicsGravityDirXSlider = physicsGravityDirX;
-        this.physicsGravityDirYSlider = physicsGravityDirY;
-        this.physicsGravityDirZSlider = physicsGravityDirZ;
-        this.physicsSimulationRateSelect = physicsSimulationRate;
-        this.physicsSimulationRateValueEl = physicsSimulationRateVal;
-
-        if (physicsSimulationRate) {
-            physicsSimulationRate.value = String(this.mmdManager.getPhysicsSimulationRateHz());
-            this.refreshPhysicsSimulationRateUi();
-            physicsSimulationRate.addEventListener("change", () => {
-                const next = this.mmdManager.setPhysicsSimulationRateHz(Number(physicsSimulationRate.value));
-                physicsSimulationRate.value = String(next);
-                this.refreshPhysicsSimulationRateUi();
-            });
-        }
-
-        if (physicsGravityAccel && physicsGravityAccelVal) {
-            const initialAccel = Math.round(this.mmdManager.getPhysicsGravityAcceleration());
-            physicsGravityAccel.value = String(initialAccel);
-            physicsGravityAccelVal.textContent = String(initialAccel);
-            physicsGravityAccel.addEventListener("input", () => {
-                const next = Number(physicsGravityAccel.value);
-                this.mmdManager.setPhysicsGravityAcceleration(next);
-                physicsGravityAccelVal.textContent = String(Math.round(next));
-            });
-        }
-
-        if (
-            physicsGravityDirX &&
-            physicsGravityDirXVal &&
-            physicsGravityDirY &&
-            physicsGravityDirYVal &&
-            physicsGravityDirZ &&
-            physicsGravityDirZVal
-        ) {
-            const initialDir = this.mmdManager.getPhysicsGravityDirection();
-            physicsGravityDirX.value = String(Math.round(initialDir.x));
-            physicsGravityDirY.value = String(Math.round(initialDir.y));
-            physicsGravityDirZ.value = String(Math.round(initialDir.z));
-            physicsGravityDirXVal.textContent = String(Math.round(initialDir.x));
-            physicsGravityDirYVal.textContent = String(Math.round(initialDir.y));
-            physicsGravityDirZVal.textContent = String(Math.round(initialDir.z));
-
-            const applyGravityDirection = () => {
-                const x = Number(physicsGravityDirX.value);
-                const y = Number(physicsGravityDirY.value);
-                const z = Number(physicsGravityDirZ.value);
-                this.mmdManager.setPhysicsGravityDirection(x, y, z);
-                physicsGravityDirXVal.textContent = String(Math.round(x));
-                physicsGravityDirYVal.textContent = String(Math.round(y));
-                physicsGravityDirZVal.textContent = String(Math.round(z));
-            };
-
-            physicsGravityDirX.addEventListener("input", applyGravityDirection);
-            physicsGravityDirY.addEventListener("input", applyGravityDirection);
-            physicsGravityDirZ.addEventListener("input", applyGravityDirection);
-        }
         // Playback
         this.btnPlay.addEventListener("click", () => this.play());
         this.btnPause.addEventListener("click", () => this.pause());
-        this.btnStop.addEventListener("click", () => this.stop());
-        this.btnSkipStart.addEventListener("click", () => this.mmdManager.seekToBoundary(0));
-        this.btnSkipEnd.addEventListener("click", () =>
-            this.mmdManager.seekToBoundary(this.mmdManager.totalFrames)
-        );
-
-        // Active model selector
-        this.modelSelect.addEventListener("change", () => {
-            this.handleModelTargetSelection(this.modelSelect.value, true);
+        this.btnStop?.addEventListener("click", () => this.stop());
+        this.btnSkipStart.addEventListener("click", () => {
+            const { startFrame } = this.getPlaybackFrameRange();
+            this.mmdManager.seekToBoundary(startFrame);
         });
-        this.shaderModelSelect?.addEventListener("change", () => {
-            this.handleModelTargetSelection(this.shaderModelSelect?.value ?? "", true);
+        this.btnSkipEnd.addEventListener("click", () => {
+            const { endFrame } = this.getPlaybackFrameRange();
+            this.mmdManager.seekToBoundary(endFrame);
         });
-
-        this.btnModelVisibility.addEventListener("click", () => {
-            if (this.mmdManager.getTimelineTarget() !== "model") return;
-            const visible = this.mmdManager.toggleActiveModelVisibility();
-            this.markSectionKeyframeDirty("info", this.getInfoKeyframeContextKey());
-            this.updateInfoActionButtons();
-            this.updateRigidBodyToggleButton();
-            this.updateSectionKeyframeButtons();
-            this.showToast(visible ? "Model visible" : "Model hidden", "info");
+        this.currentFrameEl.addEventListener("focus", () => {
+            this.currentFrameEl.select();
         });
-
-        this.btnModelDelete.addEventListener("click", () => {
-            if (this.mmdManager.getTimelineTarget() !== "model") return;
-            const ok = window.confirm("Delete selected model?");
-            if (!ok) return;
-
-            const removed = this.mmdManager.removeActiveModel();
-            if (!removed) {
-                this.showToast("Failed to delete model", "error");
+        this.currentFrameEl.addEventListener("keydown", (event) => {
+            if (event.key === "Enter") {
+                event.preventDefault();
+                this.commitCurrentFrameInput();
+                this.currentFrameEl.blur();
                 return;
             }
-
-            if (this.mmdManager.getLoadedModels().length === 0) {
-                this.mmdManager.setTimelineTarget("camera");
-                this.applyCameraSelectionUI();
+            if (event.key === "Escape") {
+                event.preventDefault();
+                this.currentFrameEl.value = String(this.mmdManager.currentFrame);
+                this.currentFrameEl.blur();
             }
-
-            this.refreshModelSelector();
-            this.refreshShaderPanel();
-            this.showToast("Model deleted", "success");
         });
-
-        this.setupAccessoryControls();
-
-        this.shaderApplyButton?.addEventListener("click", () => {
-            void this.applyShaderPresetFromPanel(false);
-        });
-        this.shaderResetButton?.addEventListener("click", () => {
-            void this.applyShaderPresetFromPanel(true);
+        this.currentFrameEl.addEventListener("blur", () => {
+            this.commitCurrentFrameInput();
         });
 
         this.btnInfoKeyframe = document.getElementById("btn-info-keyframe") as HTMLButtonElement | null;
@@ -733,58 +529,6 @@ export class UIController {
         this.btnMorphKeyframe?.addEventListener("click", () => this.registerMorphKeyframesAtCurrentFrame());
         this.btnAccessoryKeyframe?.addEventListener("click", () => this.registerAccessoryTransformKeyframe());
 
-        // Camera controls
-        const btnCamLeft = document.getElementById("btn-cam-left") as HTMLButtonElement | null;
-        const btnCamFront = document.getElementById("btn-cam-front") as HTMLButtonElement | null;
-        const btnCamRight = document.getElementById("btn-cam-right") as HTMLButtonElement | null;
-        const btnCamTop = document.getElementById("btn-cam-top") as HTMLButtonElement | null;
-        const btnCamBack = document.getElementById("btn-cam-back") as HTMLButtonElement | null;
-        const btnCamBottom = document.getElementById("btn-cam-bottom") as HTMLButtonElement | null;
-        const camDistance = document.getElementById("cam-distance") as HTMLInputElement | null;
-        const camDistanceVal = document.getElementById("cam-distance-value");
-        this.camViewLeftBtn = btnCamLeft;
-        this.camViewFrontBtn = btnCamFront;
-        this.camViewRightBtn = btnCamRight;
-        this.camViewTopBtn = btnCamTop;
-        this.camViewBackBtn = btnCamBack;
-        this.camViewBottomBtn = btnCamBottom;
-        this.camDistanceSlider = camDistance;
-        this.camDistanceValueEl = camDistanceVal;
-        const switchCameraView = (view: CameraViewPreset) => {
-            this.mmdManager.setCameraView(view);
-            this.updateCameraViewButtons(view);
-            this.bottomPanel.syncSelectedBoneSlidersFromRuntime();
-            this.markSectionKeyframeDirty("bone", this.getBoneKeyframeContextKey("Camera"));
-            this.updateSectionKeyframeButtons();
-        };
-        btnCamLeft?.addEventListener("click", () => switchCameraView("left"));
-        btnCamFront?.addEventListener("click", () => switchCameraView("front"));
-        btnCamRight?.addEventListener("click", () => switchCameraView("right"));
-        btnCamTop?.addEventListener("click", () => switchCameraView("top"));
-        btnCamBack?.addEventListener("click", () => switchCameraView("back"));
-        btnCamBottom?.addEventListener("click", () => switchCameraView("bottom"));
-        if (camDistance && camDistanceVal) {
-            camDistance.addEventListener("input", () => {
-                const val = Number(camDistance.value);
-                this.mmdManager.setCameraDistance(val);
-                camDistanceVal.textContent = `${this.mmdManager.getCameraDistance().toFixed(1)}m`;
-                this.bottomPanel.syncSelectedBoneSlidersFromRuntime();
-                this.markSectionKeyframeDirty("bone", this.getBoneKeyframeContextKey("Camera"));
-                this.updateSectionKeyframeButtons();
-                this.refreshDofAutoFocusReadout();
-            });
-        }
-        // Initialize camera UI from runtime values
-        this.updateCameraViewButtons("front");
-        if (camDistance && camDistanceVal) {
-            const initialDistance = this.mmdManager.getCameraDistance();
-            const min = Number(camDistance.min);
-            const max = Number(camDistance.max);
-            const clamped = Math.max(min, Math.min(max, initialDistance));
-            camDistance.value = String(Math.round(clamped));
-            camDistanceVal.textContent = `${initialDistance.toFixed(1)}m`;
-        }
-
         // Timeline seek
         this.timeline.onSeek = (frame) => {
             this.mmdManager.seekToBoundary(frame);
@@ -793,6 +537,7 @@ export class UIController {
         this.timeline.onSelectionChanged = (track) => {
             this.syncBoneVisualizerSelection(track);
             this.syncBottomBoneSelectionFromTimeline(track);
+            this.refreshSelectedTrackRotationOverlay();
             this.updateTimelineEditState();
             this.updateSectionKeyframeButtons();
         };
@@ -835,8 +580,20 @@ export class UIController {
 
         this.btnKeyframeAdd.addEventListener("click", () => this.addKeyframeAtCurrentFrame());
         this.btnKeyframeDelete.addEventListener("click", () => this.deleteSelectedKeyframe());
-        this.btnKeyframeNudgeLeft.addEventListener("click", () => this.nudgeSelectedKeyframe(-1));
-        this.btnKeyframeNudgeRight.addEventListener("click", () => this.nudgeSelectedKeyframe(1));
+        this.btnKeyframeNudgeLeft.addEventListener("click", () => this.seekToAdjacentKeyframePoint(-1));
+        this.btnKeyframeNudgeRight.addEventListener("click", () => this.seekToAdjacentKeyframePoint(1));
+        this.btnFrameStepLeft.addEventListener("click", () => {
+            this.mmdManager.seekToBoundary(this.mmdManager.currentFrame - 1);
+        });
+        this.btnFrameStepRight.addEventListener("click", () => {
+            this.mmdManager.seekToBoundary(this.mmdManager.currentFrame + 1);
+        });
+        this.btnFrameRangeStart.addEventListener("click", () => {
+            this.mmdManager.seekToBoundary(0);
+        });
+        this.btnFrameRangeEnd.addEventListener("click", () => {
+            this.mmdManager.seekToBoundary(this.mmdManager.totalFrames);
+        });
 
         // Lighting controls
         const elLightDirectionX = document.getElementById("light-direction-x") as HTMLInputElement;
@@ -890,52 +647,6 @@ export class UIController {
         const valEffectContrast = document.getElementById("effect-contrast-val");
         const elEffectGamma = document.getElementById("effect-gamma") as HTMLInputElement | null;
         const valEffectGamma = document.getElementById("effect-gamma-val");
-        const elEffectLensDistortion = document.getElementById("effect-lens-distortion") as HTMLInputElement | null;
-        const valEffectLensDistortion = document.getElementById("effect-lens-distortion-val");
-        const elEffectLensDistortionInfluence = document.getElementById("effect-lens-distortion-influence") as HTMLInputElement | null;
-        const valEffectLensDistortionInfluence = document.getElementById("effect-lens-distortion-influence-val");
-        const elEffectLensEdgeBlur = document.getElementById("effect-lens-edge-blur") as HTMLInputElement | null;
-        const valEffectLensEdgeBlur = document.getElementById("effect-lens-edge-blur-val");
-        const elEffectDofEnabled = document.getElementById("effect-dof-enabled") as HTMLInputElement | null;
-        const valEffectDofEnabled = document.getElementById("effect-dof-enabled-val");
-        const elEffectDofQuality = document.getElementById("effect-dof-quality") as HTMLSelectElement | null;
-        const valEffectDofQuality = document.getElementById("effect-dof-quality-val");
-        const elEffectDofFocus = document.getElementById("effect-dof-focus") as HTMLInputElement | null;
-        const valEffectDofFocus = document.getElementById("effect-dof-focus-val");
-        const elEffectDofFocusOffset = document.getElementById("effect-dof-focus-offset") as HTMLInputElement | null;
-        const valEffectDofFocusOffset = document.getElementById("effect-dof-focus-offset-val");
-        const elEffectDofFStop = document.getElementById("effect-dof-fstop") as HTMLInputElement | null;
-        const valEffectDofFStop = document.getElementById("effect-dof-fstop-val");
-        const elEffectDofNearSuppression = document.getElementById("effect-dof-near-suppression") as HTMLInputElement | null;
-        const valEffectDofNearSuppression = document.getElementById("effect-dof-near-suppression-val");
-        const elEffectDofFocalInvert = document.getElementById("effect-dof-focal-invert") as HTMLInputElement | null;
-        const valEffectDofFocalInvert = document.getElementById("effect-dof-focal-invert-val");
-        const elEffectDofLensBlur = document.getElementById("effect-dof-lens-blur") as HTMLInputElement | null;
-        const valEffectDofLensBlur = document.getElementById("effect-dof-lens-blur-val");
-        const elEffectDofLensSize = document.getElementById("effect-dof-lens-size") as HTMLInputElement | null;
-        const valEffectDofLensSize = document.getElementById("effect-dof-lens-size-val");
-        const elEffectDofFocalLength = document.getElementById("effect-dof-focal-length") as HTMLInputElement | null;
-        const valEffectDofFocalLength = document.getElementById("effect-dof-focal-length-val");
-        const elEffectFogEnabled = document.getElementById("effect-fog-enabled") as HTMLInputElement | null;
-        const valEffectFogEnabled = document.getElementById("effect-fog-enabled-val");
-        const elEffectFogMode = document.getElementById("effect-fog-mode") as HTMLSelectElement | null;
-        const valEffectFogMode = document.getElementById("effect-fog-mode-val");
-        const elEffectFogStart = document.getElementById("effect-fog-start") as HTMLInputElement | null;
-        const valEffectFogStart = document.getElementById("effect-fog-start-val");
-        const elEffectFogEnd = document.getElementById("effect-fog-end") as HTMLInputElement | null;
-        const valEffectFogEnd = document.getElementById("effect-fog-end-val");
-        const elEffectFogDensity = document.getElementById("effect-fog-density") as HTMLInputElement | null;
-        const valEffectFogDensity = document.getElementById("effect-fog-density-val");
-        const elEffectFogOpacity = document.getElementById("effect-fog-opacity") as HTMLInputElement | null;
-        const valEffectFogOpacity = document.getElementById("effect-fog-opacity-val");
-        const elEffectFogColorR = document.getElementById("effect-fog-color-r") as HTMLInputElement | null;
-        const valEffectFogColorR = document.getElementById("effect-fog-color-r-val");
-        const elEffectFogColorG = document.getElementById("effect-fog-color-g") as HTMLInputElement | null;
-        const valEffectFogColorG = document.getElementById("effect-fog-color-g-val");
-        const elEffectFogColorB = document.getElementById("effect-fog-color-b") as HTMLInputElement | null;
-        const valEffectFogColorB = document.getElementById("effect-fog-color-b-val");
-        const elEffectEdgeWidth = document.getElementById("effect-edge-width") as HTMLInputElement | null;
-        const valEffectEdgeWidth = document.getElementById("effect-edge-width-val");
 
         const updateDir = () => {
             const x = Number(elLightDirectionX.value);
@@ -967,7 +678,7 @@ export class UIController {
         elLightDirectionY.addEventListener("input", updateDir);
         elLightDirectionZ.addEventListener("input", updateDir);
 
-        const initialLightDirection = this.mmdManager.getLightDirection();
+        const initialLightDirection = this.mmdManager.getSerializedLightDirection();
         elLightDirectionX.value = this.formatRangeInputValue(elLightDirectionX, initialLightDirection.x);
         elLightDirectionY.value = this.formatRangeInputValue(elLightDirectionY, initialLightDirection.y);
         elLightDirectionZ.value = this.formatRangeInputValue(elLightDirectionZ, initialLightDirection.z);
@@ -1137,331 +848,6 @@ export class UIController {
             elEffectGamma.addEventListener("input", applyGamma);
         }
 
-        if (elEffectLensDistortion && valEffectLensDistortion) {
-            const distortionLinkedToFov = this.mmdManager.dofLensDistortionLinkedToCameraFov;
-            this.lensDistortionSlider = elEffectLensDistortion;
-            this.lensDistortionValueEl = valEffectLensDistortion;
-            const applyLensDistortion = () => {
-                if (distortionLinkedToFov) {
-                    this.refreshLensDistortionAutoReadout();
-                    return;
-                }
-                const scale = Number(elEffectLensDistortion.value) / 100;
-                this.mmdManager.dofLensDistortion = scale;
-                valEffectLensDistortion.textContent = `${Math.round(this.mmdManager.dofLensDistortion * 100)}%`;
-            };
-            elEffectLensDistortion.value = String(Math.round(this.mmdManager.dofLensDistortion * 100));
-            if (distortionLinkedToFov) {
-                elEffectLensDistortion.disabled = true;
-                elEffectLensDistortion.title = "Auto distortion (linked to camera FoV; 30deg = 0%)";
-            }
-            applyLensDistortion();
-            if (!distortionLinkedToFov) {
-                elEffectLensDistortion.addEventListener("input", applyLensDistortion);
-            }
-        }
-
-        if (elEffectLensDistortionInfluence && valEffectLensDistortionInfluence) {
-            const applyLensDistortionInfluence = () => {
-                const scale = Number(elEffectLensDistortionInfluence.value) / 100;
-                this.mmdManager.dofLensDistortionInfluence = scale;
-                valEffectLensDistortionInfluence.textContent = `${Math.round(this.mmdManager.dofLensDistortionInfluence * 100)}%`;
-                this.refreshLensDistortionAutoReadout();
-            };
-            elEffectLensDistortionInfluence.value = String(
-                Math.round(this.mmdManager.dofLensDistortionInfluence * 100)
-            );
-            applyLensDistortionInfluence();
-            elEffectLensDistortionInfluence.addEventListener("input", applyLensDistortionInfluence);
-        }
-
-        if (elEffectLensEdgeBlur && valEffectLensEdgeBlur) {
-            const applyLensEdgeBlur = () => {
-                const scale = Number(elEffectLensEdgeBlur.value) / 100;
-                this.mmdManager.dofLensEdgeBlur = scale;
-                valEffectLensEdgeBlur.textContent = `${Math.round(this.mmdManager.dofLensEdgeBlur * 100)}%`;
-            };
-            elEffectLensEdgeBlur.value = String(Math.round(this.mmdManager.dofLensEdgeBlur * 100));
-            applyLensEdgeBlur();
-            elEffectLensEdgeBlur.addEventListener("input", applyLensEdgeBlur);
-        }
-
-        if (
-            elEffectDofEnabled &&
-            valEffectDofEnabled &&
-            elEffectDofQuality &&
-            valEffectDofQuality &&
-            elEffectDofFocus &&
-            valEffectDofFocus &&
-            elEffectDofFocusOffset &&
-            valEffectDofFocusOffset &&
-            elEffectDofFStop &&
-            valEffectDofFStop &&
-            elEffectDofNearSuppression &&
-            valEffectDofNearSuppression &&
-            elEffectDofFocalInvert &&
-            valEffectDofFocalInvert &&
-            elEffectDofLensSize &&
-            valEffectDofLensSize &&
-            elEffectDofFocalLength &&
-            valEffectDofFocalLength
-        ) {
-            const blurLabels = [t("option.low"), t("option.medium"), t("option.high")];
-            const autoFocusEnabled = this.mmdManager.dofAutoFocusEnabled;
-            const focalLengthLinkedToFov = this.mmdManager.dofFocalLengthLinkedToCameraFov;
-            this.dofFocusSlider = elEffectDofFocus;
-            this.dofFocusValueEl = valEffectDofFocus;
-            this.dofFStopValueEl = valEffectDofFStop;
-            this.dofFocalLengthSlider = elEffectDofFocalLength;
-            this.dofFocalLengthValueEl = valEffectDofFocalLength;
-
-            const applyDofEnabled = () => {
-                this.mmdManager.dofEnabled = elEffectDofEnabled.checked;
-                elEffectDofEnabled.checked = this.mmdManager.dofEnabled;
-                valEffectDofEnabled.textContent = this.mmdManager.dofEnabled ? t("status.on") : t("status.off");
-            };
-            const applyDofQuality = () => {
-                const level = Number(elEffectDofQuality.value);
-                this.mmdManager.dofBlurLevel = level;
-                valEffectDofQuality.textContent = blurLabels[this.mmdManager.dofBlurLevel] ?? t("option.high");
-            };
-            const applyDofFocus = () => {
-                if (autoFocusEnabled) {
-                    this.refreshDofAutoFocusReadout();
-                    return;
-                }
-                const mm = Number(elEffectDofFocus.value);
-                this.mmdManager.dofFocusDistanceMm = mm;
-                valEffectDofFocus.textContent = `${(this.mmdManager.dofFocusDistanceMm / 1000).toFixed(1)}m`;
-            };
-            const applyDofFocusOffset = () => {
-                const mm = Number(elEffectDofFocusOffset.value);
-                this.mmdManager.dofAutoFocusNearOffsetMm = mm;
-                valEffectDofFocusOffset.textContent = `${(this.mmdManager.dofAutoFocusNearOffsetMm / 1000).toFixed(1)}m`;
-                if (autoFocusEnabled) {
-                    this.refreshDofAutoFocusReadout();
-                }
-            };
-            const applyDofFStop = () => {
-                const fStop = Number(elEffectDofFStop.value) / 100;
-                this.mmdManager.dofFStop = fStop;
-                if (autoFocusEnabled) {
-                    this.refreshDofAutoFocusReadout();
-                    return;
-                }
-                valEffectDofFStop.textContent = this.mmdManager.dofFStop.toFixed(2);
-            };
-            const applyDofNearSuppression = () => {
-                const scale = Number(elEffectDofNearSuppression.value) / 100;
-                this.mmdManager.dofNearSuppressionScale = scale;
-                valEffectDofNearSuppression.textContent = `${Math.round(this.mmdManager.dofNearSuppressionScale * 100)}%`;
-                if (autoFocusEnabled) {
-                    this.refreshDofAutoFocusReadout();
-                }
-            };
-            const applyDofFocalInvert = () => {
-                this.mmdManager.dofFocalLengthDistanceInverted = elEffectDofFocalInvert.checked;
-                valEffectDofFocalInvert.textContent = this.mmdManager.dofFocalLengthDistanceInverted ? t("status.on") : t("status.off");
-                if (focalLengthLinkedToFov) {
-                    elEffectDofFocalLength.title = this.mmdManager.dofFocalLengthDistanceInverted
-                        ? "Auto focal length (linked to camera FoV, inverted)"
-                        : "Auto focal length (linked to camera FoV)";
-                    this.refreshDofAutoFocusReadout();
-                }
-            };
-            const applyDofLensSize = () => {
-                const lensSize = Number(elEffectDofLensSize.value);
-                this.mmdManager.dofLensSize = lensSize;
-                valEffectDofLensSize.textContent = `${Math.round(this.mmdManager.dofLensSize)}`;
-                if (autoFocusEnabled) {
-                    this.refreshDofAutoFocusReadout();
-                }
-            };
-            const applyDofFocalLength = () => {
-                if (focalLengthLinkedToFov) {
-                    this.refreshDofAutoFocusReadout();
-                    return;
-                }
-                const focalLength = Number(elEffectDofFocalLength.value);
-                this.mmdManager.dofFocalLength = focalLength;
-                valEffectDofFocalLength.textContent = `${Math.round(this.mmdManager.dofFocalLength)}`;
-                if (autoFocusEnabled) {
-                    this.refreshDofAutoFocusReadout();
-                }
-            };
-
-            elEffectDofEnabled.checked = this.mmdManager.dofEnabled;
-            elEffectDofQuality.value = String(this.mmdManager.dofBlurLevel);
-            elEffectDofFocus.value = String(Math.round(this.mmdManager.dofFocusDistanceMm));
-            elEffectDofFocusOffset.value = String(Math.round(this.mmdManager.dofAutoFocusNearOffsetMm));
-            elEffectDofFStop.value = String(Math.round(this.mmdManager.dofFStop * 100));
-            elEffectDofNearSuppression.value = String(Math.round(this.mmdManager.dofNearSuppressionScale * 100));
-            elEffectDofFocalInvert.checked = this.mmdManager.dofFocalLengthDistanceInverted;
-            elEffectDofLensSize.value = String(Math.round(this.mmdManager.dofLensSize));
-            elEffectDofFocalLength.value = String(Math.round(this.mmdManager.dofFocalLength));
-            if (elEffectDofLensBlur && valEffectDofLensBlur) {
-                elEffectDofLensBlur.value = String(Math.round(this.mmdManager.dofLensBlurStrength * 100));
-                valEffectDofLensBlur.textContent = `${Math.round(this.mmdManager.dofLensBlurStrength * 100)}%`;
-            }
-            if (autoFocusEnabled) {
-                elEffectDofFocus.disabled = true;
-                elEffectDofFocus.title = `Auto focus (camera target, ${this.mmdManager.dofAutoFocusRangeMeters.toFixed(1)}m radius in focus)`;
-            }
-            if (focalLengthLinkedToFov) {
-                elEffectDofFocalLength.disabled = true;
-                elEffectDofFocalLength.title = "Auto focal length (linked to camera FoV)";
-            }
-
-            applyDofEnabled();
-            applyDofQuality();
-            applyDofFocus();
-            applyDofFocusOffset();
-            applyDofFStop();
-            applyDofNearSuppression();
-            applyDofFocalInvert();
-            applyDofLensSize();
-            applyDofFocalLength();
-            this.refreshDofAutoFocusReadout();
-
-            elEffectDofEnabled.addEventListener("change", applyDofEnabled);
-            elEffectDofQuality.addEventListener("change", applyDofQuality);
-            if (!autoFocusEnabled) {
-                elEffectDofFocus.addEventListener("input", applyDofFocus);
-            }
-            elEffectDofFocusOffset.addEventListener("input", applyDofFocusOffset);
-            elEffectDofFStop.addEventListener("input", applyDofFStop);
-            elEffectDofNearSuppression.addEventListener("input", applyDofNearSuppression);
-            elEffectDofFocalInvert.addEventListener("change", applyDofFocalInvert);
-            elEffectDofLensSize.addEventListener("input", applyDofLensSize);
-            if (!focalLengthLinkedToFov) {
-                elEffectDofFocalLength.addEventListener("input", applyDofFocalLength);
-            }
-            if (elEffectDofLensBlur && valEffectDofLensBlur) {
-                const applyDofLensBlur = () => {
-                    const strength = Number(elEffectDofLensBlur.value) / 100;
-                    this.mmdManager.dofLensBlurStrength = strength;
-                    valEffectDofLensBlur.textContent = `${Math.round(this.mmdManager.dofLensBlurStrength * 100)}%`;
-                };
-                applyDofLensBlur();
-                elEffectDofLensBlur.addEventListener("input", applyDofLensBlur);
-            }
-        }
-
-        if (
-            elEffectFogEnabled &&
-            valEffectFogEnabled &&
-            elEffectFogStart &&
-            valEffectFogStart &&
-            elEffectFogEnd &&
-            valEffectFogEnd &&
-            elEffectFogDensity &&
-            valEffectFogDensity &&
-            elEffectFogOpacity &&
-            valEffectFogOpacity &&
-            elEffectFogColorR &&
-            valEffectFogColorR &&
-            elEffectFogColorG &&
-            valEffectFogColorG &&
-            elEffectFogColorB &&
-            valEffectFogColorB
-        ) {
-            const syncFogModeAvailability = () => {
-                const mode = this.mmdManager.postEffectFogMode;
-                const isLinear = mode === 0;
-                elEffectFogStart.disabled = !isLinear;
-                elEffectFogEnd.disabled = !isLinear;
-                elEffectFogDensity.disabled = isLinear;
-            };
-
-            const applyFogEnabled = () => {
-                this.mmdManager.postEffectFogEnabled = elEffectFogEnabled.checked;
-                elEffectFogEnabled.checked = this.mmdManager.postEffectFogEnabled;
-                valEffectFogEnabled.textContent = this.mmdManager.postEffectFogEnabled ? t("status.on") : t("status.off");
-            };
-
-            const applyFogStart = () => {
-                this.mmdManager.postEffectFogStart = Number(elEffectFogStart.value);
-                valEffectFogStart.textContent = `${Math.round(this.mmdManager.postEffectFogStart)}`;
-                if (Number(elEffectFogEnd.value) < this.mmdManager.postEffectFogStart) {
-                    elEffectFogEnd.value = String(Math.round(this.mmdManager.postEffectFogStart));
-                    applyFogEnd();
-                }
-            };
-
-            const applyFogEnd = () => {
-                this.mmdManager.postEffectFogEnd = Number(elEffectFogEnd.value);
-                valEffectFogEnd.textContent = `${Math.round(this.mmdManager.postEffectFogEnd)}`;
-            };
-
-            const applyFogDensity = () => {
-                this.mmdManager.postEffectFogDensity = Number(elEffectFogDensity.value);
-                valEffectFogDensity.textContent = `${Math.round(this.mmdManager.postEffectFogDensity * 10000)}`;
-            };
-
-            const applyFogOpacity = () => {
-                this.mmdManager.postEffectFogOpacity = Number(elEffectFogOpacity.value);
-                valEffectFogOpacity.textContent = `${Math.round(this.mmdManager.postEffectFogOpacity * 100)}`;
-            };
-
-            const applyFogColor = () => {
-                this.mmdManager.setPostEffectFogColor(
-                    Number(elEffectFogColorR.value) / 255,
-                    Number(elEffectFogColorG.value) / 255,
-                    Number(elEffectFogColorB.value) / 255,
-                );
-                const fogColor = this.mmdManager.getPostEffectFogColor();
-                valEffectFogColorR.textContent = `${Math.round(fogColor.r * 255)}`;
-                valEffectFogColorG.textContent = `${Math.round(fogColor.g * 255)}`;
-                valEffectFogColorB.textContent = `${Math.round(fogColor.b * 255)}`;
-            };
-
-            const fogColor = this.mmdManager.getPostEffectFogColor();
-            this.mmdManager.postEffectFogMode = 2;
-            elEffectFogEnabled.checked = this.mmdManager.postEffectFogEnabled;
-            if (elEffectFogMode) {
-                elEffectFogMode.value = "2";
-            }
-            if (valEffectFogMode) {
-                valEffectFogMode.textContent = t("option.fog.exp2");
-            }
-            elEffectFogStart.value = String(Math.round(this.mmdManager.postEffectFogStart));
-            elEffectFogEnd.value = String(Math.round(this.mmdManager.postEffectFogEnd));
-            elEffectFogDensity.value = this.mmdManager.postEffectFogDensity.toFixed(4);
-            elEffectFogOpacity.value = this.mmdManager.postEffectFogOpacity.toFixed(2);
-            elEffectFogColorR.value = String(Math.round(fogColor.r * 255));
-            elEffectFogColorG.value = String(Math.round(fogColor.g * 255));
-            elEffectFogColorB.value = String(Math.round(fogColor.b * 255));
-
-            applyFogEnabled();
-            syncFogModeAvailability();
-            applyFogStart();
-            applyFogEnd();
-            applyFogDensity();
-            applyFogOpacity();
-            applyFogColor();
-
-            elEffectFogEnabled.addEventListener("change", applyFogEnabled);
-            elEffectFogStart.addEventListener("input", applyFogStart);
-            elEffectFogEnd.addEventListener("input", applyFogEnd);
-            elEffectFogDensity.addEventListener("input", applyFogDensity);
-            elEffectFogOpacity.addEventListener("input", applyFogOpacity);
-            elEffectFogColorR.addEventListener("input", applyFogColor);
-            elEffectFogColorG.addEventListener("input", applyFogColor);
-            elEffectFogColorB.addEventListener("input", applyFogColor);
-        }
-
-        if (elEffectEdgeWidth && valEffectEdgeWidth) {
-            const applyEdgeWidth = () => {
-                const sliderValue = Number(elEffectEdgeWidth.value);
-                const scale = sliderValue / 100;
-                this.mmdManager.modelEdgeWidth = scale;
-                valEffectEdgeWidth.textContent = `${Math.round(this.mmdManager.modelEdgeWidth * 100)}%`;
-            };
-            elEffectEdgeWidth.value = String(Math.round(this.mmdManager.modelEdgeWidth * 100));
-            applyEdgeWidth();
-            elEffectEdgeWidth.addEventListener("input", applyEdgeWidth);
-        }
-
         // Initialize direction from HTML default values
         updateDir();
     }
@@ -1469,7 +855,9 @@ export class UIController {
     private setupCallbacks(): void {
         // Frame update
         this.mmdManager.onFrameUpdate = (frame, total) => {
-            this.currentFrameEl.textContent = String(frame);
+            if (document.activeElement !== this.currentFrameEl) {
+                this.currentFrameEl.value = String(frame);
+            }
             this.totalFramesEl.textContent = String(total);
             this.timeline.setTotalFrames(total);
             this.timeline.setCurrentFrame(frame);
@@ -1507,18 +895,14 @@ export class UIController {
             }
             this.bottomPanel.syncSelectedMorphFrameSlidersFromRuntime(true);
 
-            if (this.camDistanceSlider && this.camDistanceValueEl) {
-                const distance = sourcePose?.distance ?? this.mmdManager.getCameraDistance();
-                const clamped = Math.max(Number(this.camDistanceSlider.min), Math.min(Number(this.camDistanceSlider.max), distance));
-                this.camDistanceSlider.value = String(Math.round(clamped));
-                this.camDistanceValueEl.textContent = `${distance.toFixed(1)}m`;
-                this.syncRangeNumberInput(this.camDistanceSlider);
-            }
-            this.refreshDofAutoFocusReadout();
-            this.refreshLensDistortionAutoReadout();
+            this.cameraPanelController?.refresh(false, sourcePose?.distance ?? this.mmdManager.getCameraDistance());
+            this.dofPanelController?.refreshAutoFocusReadout();
+            this.lensEffectController?.refreshAutoReadout();
+            this.exportUiController?.syncFrameRangeFromTimeline();
 
-            if (this.mmdManager.isPlaying && total > 0 && frame >= total) {
-                this.stopAtPlaybackEnd();
+            const { endFrame } = this.getPlaybackFrameRange();
+            if (this.mmdManager.isPlaying && this.isPlaybackFrameStopEnabled() && frame >= endFrame) {
+                this.stopAtPlaybackEnd(endFrame);
             }
         };
 
@@ -1532,8 +916,9 @@ export class UIController {
                 this.applyActiveModelSelectionUI();
             }
             this.refreshModelSelector();
+            this.dofPanelController?.refreshFocusTargetControls();
             this.refreshShaderPanel();
-            this.updateRigidBodyToggleButton();
+            this.runtimeFeatureUiController?.refreshRigidBodies();
         };
 
         // Any model loaded into scene
@@ -1544,10 +929,16 @@ export class UIController {
                 this.applyActiveModelSelectionUI();
             }
             this.refreshModelSelector();
+            this.dofPanelController?.refreshFocusTargetControls();
             this.refreshShaderPanel();
-            this.updateRigidBodyToggleButton();
+            this.runtimeFeatureUiController?.refreshRigidBodies();
             const activeLabel = active ? " [active]" : "";
             this.showToast(`Loaded model: ${info.name} (${totalCount})${activeLabel}`, "success");
+        };
+
+        this.mmdManager.onDofFocusTargetChanged = () => {
+            this.dofPanelController?.refreshFocusTargetControls();
+            this.dofPanelController?.refreshAutoFocusReadout();
         };
 
         // Motion loaded
@@ -1555,6 +946,7 @@ export class UIController {
             this.setStatus("Motion loaded", false);
             this.timeline.setTotalFrames(info.frameCount);
             this.totalFramesEl.textContent = String(info.frameCount);
+            this.exportUiController?.syncFrameRangeFromTimeline();
             this.showToast(`Loaded motion: ${info.name}`, "success");
         };
 
@@ -1562,6 +954,7 @@ export class UIController {
             this.setStatus("Camera motion loaded", false);
             this.timeline.setTotalFrames(info.frameCount);
             this.totalFramesEl.textContent = String(info.frameCount);
+            this.exportUiController?.syncFrameRangeFromTimeline();
             this.showToast(`Loaded camera motion: ${info.name}`, "success");
         };
 
@@ -1578,6 +971,7 @@ export class UIController {
             }
             this.syncBoneVisualizerSelection(this.timeline.getSelectedTrack());
             this.syncBottomBoneSelectionFromTimeline(this.timeline.getSelectedTrack());
+            this.refreshSelectedTrackRotationOverlay();
             this.updateTimelineEditState();
         };
 
@@ -1585,6 +979,7 @@ export class UIController {
         this.mmdManager.onAudioLoaded = (name: string) => {
             this.setStatus("Audio loaded", false);
             this.showToast(`Loaded audio: ${name}`, "success");
+            void this.refreshTimelineWaveformFromAudio();
         };
 
         // Error
@@ -1593,13 +988,13 @@ export class UIController {
             this.showToast(message, "error");
         };
 
-        this.mmdManager.onPhysicsStateChanged = (enabled: boolean, available: boolean) => {
-            this.updatePhysicsToggleButton(enabled, available);
-            this.updateRigidBodyToggleButton();
+        this.mmdManager.onPhysicsStateChanged = () => {
+            this.runtimeFeatureUiController?.refreshPhysics();
+            this.runtimeFeatureUiController?.refreshRigidBodies();
         };
 
         this.mmdManager.onGlobalIlluminationStateChanged = () => {
-            this.updateGiToggleButton();
+            this.runtimeFeatureUiController?.refreshGi();
         };
 
         this.mmdManager.onBoneVisualizerBonePicked = (boneName: string) => {
@@ -1614,155 +1009,98 @@ export class UIController {
         };
     }
 
-    private setupPngSequenceExportStateBridge(): void {
-        this.pngSequenceExportStateUnsubscribe?.();
-        this.pngSequenceExportStateUnsubscribe = window.electronAPI.onPngSequenceExportState((state) => {
-            this.applyPngSequenceExportState(state);
-        });
-        this.pngSequenceExportProgressUnsubscribe?.();
-        this.pngSequenceExportProgressUnsubscribe = window.electronAPI.onPngSequenceExportProgress((progress) => {
-            this.applyPngSequenceExportProgress(progress);
-        });
-    }
-
-    private applyPngSequenceExportState(state: PngSequenceExportState): void {
-        this.isPngSequenceExportActive = Boolean(state?.active);
-        this.pngSequenceExportActiveCount = Math.max(0, Math.floor(state?.activeCount ?? 0));
-        if (!this.isPngSequenceExportActive) {
-            this.latestPngSequenceExportProgress = null;
+    private async refreshTimelineWaveformFromAudio(): Promise<void> {
+        const requestId = ++this.timelineWaveformRequestId;
+        const audioPath = this.mmdManager.getAudioSourcePath();
+        if (!audioPath) {
+            this.timeline.setWaveformPeaks(null);
+            return;
         }
-        this.refreshBackgroundExportLock();
-    }
 
-    private applyPngSequenceExportProgress(progress: PngSequenceExportProgress): void {
-        if (!this.isPngSequenceExportActive) return;
-        this.latestPngSequenceExportProgress = progress;
-        this.refreshBackgroundExportLock();
-    }
+        try {
+            const arrayBuffer = await this.readRendererBinaryFileAsArrayBuffer(audioPath);
+            if (!arrayBuffer) {
+                if (requestId === this.timelineWaveformRequestId) {
+                    this.timeline.setWaveformPeaks(null);
+                }
+                return;
+            }
 
-    private setupWebmExportStateBridge(): void {
-        this.webmExportStateUnsubscribe?.();
-        this.webmExportStateUnsubscribe = window.electronAPI.onWebmExportState((state) => {
-            this.applyWebmExportState(state);
-        });
-        this.webmExportProgressUnsubscribe?.();
-        this.webmExportProgressUnsubscribe = window.electronAPI.onWebmExportProgress((progress) => {
-            this.applyWebmExportProgress(progress);
-        });
-    }
+            const audioContext = new AudioContext();
+            let audioBuffer: AudioBuffer;
+            try {
+                audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+            } finally {
+                try {
+                    await audioContext.close();
+                } catch {
+                    // ignore close failures
+                }
+            }
 
-    private startBackgroundExportMonitor(): void {
-        if (this.backgroundExportMonitorIntervalId !== null) return;
-        this.backgroundExportMonitorIntervalId = window.setInterval(() => {
-            if (!this.hasBackgroundExportActive()) return;
-            this.refreshBackgroundExportLock();
-        }, 500);
-    }
+            if (requestId !== this.timelineWaveformRequestId) {
+                return;
+            }
 
-    private applyWebmExportState(state: WebmExportState): void {
-        this.isWebmExportActive = Boolean(state?.active);
-        this.webmExportActiveCount = Math.max(0, Math.floor(state?.activeCount ?? 0));
-        if (!this.isWebmExportActive) {
-            this.latestWebmExportProgress = null;
-        }
-        this.refreshBackgroundExportLock();
-    }
-
-    private applyWebmExportProgress(progress: WebmExportProgress): void {
-        if (!this.isWebmExportActive) return;
-        this.latestWebmExportProgress = progress;
-        this.refreshBackgroundExportLock();
-    }
-
-    private formatWebmExportPhaseLabel(phase: WebmExportProgress["phase"]): string {
-        switch (phase) {
-            case "initializing": return t("webm.phase.initializing");
-            case "loading-project": return t("webm.phase.loadingProject");
-            case "checking-codec": return t("webm.phase.checkingCodec");
-            case "opening-output": return t("webm.phase.openingOutput");
-            case "encoding": return t("webm.phase.encoding");
-            case "closing-track": return t("webm.phase.closingTrack");
-            case "finalizing": return t("webm.phase.finalizing");
-            case "finishing-job": return t("webm.phase.finishingJob");
-            case "completed": return t("webm.phase.completed");
-            case "failed": return t("webm.phase.failed");
-            default: return phase;
+            const peaks = this.buildTimelineWaveformPeaks(audioBuffer, UIController.TIMELINE_WAVEFORM_FPS);
+            this.timeline.setWaveformPeaks(peaks);
+        } catch (err: unknown) {
+            if (requestId !== this.timelineWaveformRequestId) {
+                return;
+            }
+            console.warn("Failed to refresh timeline waveform:", err);
+            this.timeline.setWaveformPeaks(null);
         }
     }
 
-    private formatExportAge(timestampMs: number | undefined): string {
-        if (!timestampMs || !Number.isFinite(timestampMs)) return "n/a";
-        const seconds = Math.max(0, (Date.now() - timestampMs) / 1000);
-        return `${seconds.toFixed(seconds >= 10 ? 0 : 1)}s ago`;
+    private async readRendererBinaryFileAsArrayBuffer(filePath: string): Promise<ArrayBuffer | null> {
+        const buffer = await window.electronAPI.readBinaryFile(filePath);
+        if (!buffer) {
+            return null;
+        }
+
+        const bytes = buffer instanceof Uint8Array
+            ? buffer
+            : new Uint8Array(buffer as unknown as ArrayBuffer);
+        const copy = new Uint8Array(bytes.byteLength);
+        copy.set(bytes);
+        return copy.buffer;
+    }
+
+    private buildTimelineWaveformPeaks(audioBuffer: AudioBuffer, fps: number): Float32Array {
+        const normalizedFps = Math.max(1, Math.floor(fps));
+        const sampleRate = Math.max(1, audioBuffer.sampleRate);
+        const frameCount = Math.max(1, Math.ceil(audioBuffer.duration * normalizedFps));
+        const peaks = new Float32Array(frameCount);
+        const channelData = Array.from({ length: audioBuffer.numberOfChannels }, (_, index) =>
+            audioBuffer.getChannelData(index)
+        );
+
+        for (let frame = 0; frame < frameCount; frame += 1) {
+            const startSample = Math.min(audioBuffer.length, Math.floor(frame * sampleRate / normalizedFps));
+            const nextStartSample = Math.min(audioBuffer.length, Math.floor((frame + 1) * sampleRate / normalizedFps));
+            const endSample = Math.max(startSample + 1, nextStartSample);
+
+            let peak = 0;
+            for (let channelIndex = 0; channelIndex < channelData.length; channelIndex += 1) {
+                const samples = channelData[channelIndex];
+                const sampleLimit = Math.min(endSample, samples.length);
+                for (let sampleIndex = startSample; sampleIndex < sampleLimit; sampleIndex += 1) {
+                    const amplitude = Math.abs(samples[sampleIndex] ?? 0);
+                    if (amplitude > peak) {
+                        peak = amplitude;
+                    }
+                }
+            }
+
+            peaks[frame] = peak;
+        }
+
+        return peaks;
     }
 
     private hasBackgroundExportActive(): boolean {
-        return this.isPngSequenceExportActive || this.isWebmExportActive;
-    }
-
-    private refreshBackgroundExportLock(): void {
-        const active = this.hasBackgroundExportActive();
-        this.appRootEl.classList.toggle("ui-export-lock", active);
-        this.busyOverlayEl?.classList.toggle("hidden", !active);
-        this.busyOverlayEl?.setAttribute("aria-hidden", active ? "false" : "true");
-
-        if (!active) {
-            if (this.busyTextEl) {
-                this.busyTextEl.textContent = t("busy.backgroundExportFinished");
-            }
-            return;
-        }
-
-        if (this.mmdManager.isPlaying) {
-            this.pause(false);
-        }
-        this.updateBackgroundExportBusyMessage();
-    }
-
-    private updateBackgroundExportBusyMessage(): void {
-        if (!this.busyTextEl) return;
-
-        if (this.isWebmExportActive) {
-            const progress = this.latestWebmExportProgress;
-            if (progress) {
-                const total = Math.max(0, Math.floor(progress.total));
-                const encoded = Math.max(0, Math.floor(progress.encoded));
-                const frame = Math.max(0, Math.floor(progress.frame));
-                const phaseLabel = this.formatWebmExportPhaseLabel(progress.phase);
-                if (total > 0) {
-                    const ratio = Math.min(100, Math.max(0, (encoded / total) * 100));
-                    this.busyTextEl.textContent = t("busy.webmProgress", { phase: phaseLabel, encoded, total, ratio: ratio.toFixed(1), frame });
-                    return;
-                }
-                this.busyTextEl.textContent = t("busy.webmExportRunning");
-                return;
-            }
-            if (this.webmExportActiveCount > 1) {
-                this.busyTextEl.textContent = t("busy.webmExportActive", { count: this.webmExportActiveCount });
-                return;
-            }
-            this.busyTextEl.textContent = t("busy.webmExportRunning");
-            return;
-        }
-
-        if (this.isPngSequenceExportActive) {
-            const progress = this.latestPngSequenceExportProgress;
-            if (progress) {
-                const total = Math.max(0, Math.floor(progress.total));
-                const saved = Math.max(0, Math.floor(progress.saved));
-                const frame = Math.max(0, Math.floor(progress.frame));
-                if (total > 0) {
-                    const ratio = Math.min(100, Math.max(0, (saved / total) * 100));
-                    this.busyTextEl.textContent = t("busy.webmProgress", { phase: "PNG", encoded: saved, total, ratio: ratio.toFixed(1), frame });
-                    return;
-                }
-            }
-            if (this.pngSequenceExportActiveCount > 1) {
-                this.busyTextEl.textContent = t("busy.webmExportActive", { count: this.pngSequenceExportActiveCount });
-                return;
-            }
-            this.busyTextEl.textContent = t("busy.exportingPngSequence");
-        }
+        return this.exportUiController?.hasBackgroundExportActive() ?? false;
     }
 
     private setupFileDrop(): void {
@@ -1855,9 +1193,9 @@ export class UIController {
 
     private setupKeyboard(): void {
         document.addEventListener("keydown", (e) => {
-            if (e.key === "Escape" && this.isUiFullscreenActive) {
+            if (e.key === "Escape" && this.layoutUiController?.isUiFullscreenModeActive()) {
                 e.preventDefault();
-                this.exitUiFullscreenMode();
+                this.layoutUiController.exitUiFullscreenMode();
                 return;
             }
 
@@ -1875,7 +1213,7 @@ export class UIController {
             // Alt+Enter: MMD-like fullscreen toggle (mapped to UI fullscreen mode).
             if (!e.ctrlKey && !e.metaKey && e.altKey && e.key === "Enter") {
                 e.preventDefault();
-                this.toggleUiFullscreenMode();
+                this.layoutUiController?.toggleUiFullscreenMode();
                 return;
             }
 
@@ -1954,9 +1292,7 @@ export class UIController {
 
                 if (lowerKey === "g") {
                     e.preventDefault();
-                    const visible = this.mmdManager.toggleGroundVisible();
-                    this.updateGroundToggleButton(visible);
-                    this.showToast(visible ? t("toast.ground.on") : t("toast.ground.off"), "info");
+                    this.sceneEnvironmentUiController?.toggleGround();
                     return;
                 }
 
@@ -1968,11 +1304,7 @@ export class UIController {
 
                 if (lowerKey === "b") {
                     e.preventDefault();
-                    const enabled = this.mmdManager.toggleBackgroundBlack();
-                    this.showToast(
-                        enabled ? t("toast.background.black") : t("toast.background.default"),
-                        "info"
-                    );
+                    this.sceneEnvironmentUiController?.toggleBackgroundBlack();
                     return;
                 }
             }
@@ -1987,10 +1319,10 @@ export class UIController {
                     }
                     break;
                 case "Home":
-                    this.mmdManager.seekToBoundary(0);
+                    this.mmdManager.seekToBoundary(this.getPlaybackFrameRange().startFrame);
                     break;
                 case "End":
-                    this.mmdManager.seekToBoundary(this.mmdManager.totalFrames);
+                    this.mmdManager.seekToBoundary(this.getPlaybackFrameRange().endFrame);
                     break;
                 case "ArrowLeft":
                     this.mmdManager.seekToBoundary(this.mmdManager.currentFrame - (e.shiftKey ? 10 : 1));
@@ -2039,7 +1371,7 @@ export class UIController {
             // Ctrl+Shift+S = export PNG
             if (e.ctrlKey && e.shiftKey && !e.altKey && (e.key === "S" || e.key === "s")) {
                 e.preventDefault();
-                void this.exportPNG();
+                void this.exportUiController?.exportPNG();
             }
         });
     }
@@ -2050,6 +1382,24 @@ export class UIController {
         if (target instanceof HTMLSelectElement) return true;
         if (target instanceof HTMLTextAreaElement) return true;
         return target.isContentEditable || target.closest("[contenteditable='true']") !== null;
+    }
+
+    private commitCurrentFrameInput(): void {
+        const rawValue = this.currentFrameEl.value.trim();
+        if (rawValue.length === 0) {
+            this.currentFrameEl.value = String(this.mmdManager.currentFrame);
+            return;
+        }
+
+        const parsedFrame = Number.parseInt(rawValue, 10);
+        if (!Number.isFinite(parsedFrame)) {
+            this.currentFrameEl.value = String(this.mmdManager.currentFrame);
+            return;
+        }
+
+        const nextFrame = Math.max(0, parsedFrame);
+        this.currentFrameEl.value = String(nextFrame);
+        this.mmdManager.seekToBoundary(nextFrame);
     }
 
     private cycleActiveModelByShortcut(direction: 1 | -1): void {
@@ -2119,31 +1469,7 @@ export class UIController {
             this.mmdManager.modelEdgeWidth = restore;
             this.showToast(t("toast.edge.on"), "info");
         }
-        this.syncEdgeWidthUiFromRuntime();
-    }
-
-    private syncEdgeWidthUiFromRuntime(): void {
-        const edgePercent = Math.round(this.mmdManager.modelEdgeWidth * 100);
-
-        const staticInput = document.getElementById("effect-edge-width") as HTMLInputElement | null;
-        const staticValue = document.getElementById("effect-edge-width-val");
-        if (staticInput) {
-            staticInput.value = String(edgePercent);
-            this.syncRangeNumberInput(staticInput);
-        }
-        if (staticValue) {
-            staticValue.textContent = `${edgePercent}%`;
-        }
-
-        const panelInput = this.shaderMaterialList?.querySelector<HTMLInputElement>('input[data-postfx="edge-width"]');
-        const panelValue = this.shaderMaterialList?.querySelector<HTMLElement>('span[data-postfx-val="edge-width"]');
-        if (panelInput) {
-            panelInput.value = String(edgePercent);
-            this.syncRangeNumberInput(panelInput);
-        }
-        if (panelValue) {
-            panelValue.textContent = `${edgePercent}%`;
-        }
+        this.modelEdgeController?.refresh();
     }
 
     private setupPerfDisplay(): void {
@@ -2214,7 +1540,7 @@ export class UIController {
                 : fps >= 30 ? "var(--accent-amber)"
                     : "var(--accent-red)";
             updatePerfBadges();
-            this.refreshDofAutoFocusReadout();
+            this.dofPanelController?.refreshAutoFocusReadout();
         }, 1000);
 
         // Volume fader
@@ -2264,103 +1590,73 @@ export class UIController {
     }
 
     private exportOutputProjectState(): ProjectOutputState {
-        const outputSettings = this.getOutputSettings();
-        const qualityRaw = Number.parseFloat(this.outputQualitySelect?.value ?? "1");
-        const fpsRaw = Number.parseInt(this.outputFpsSelect?.value ?? "30", 10);
-
-        return {
-            aspectPreset: this.outputAspectSelect?.value ?? "16:9",
-            sizePreset: this.outputSizePresetSelect?.value ?? "1920",
-            width: outputSettings.width,
-            height: outputSettings.height,
-            lockAspect: Boolean(this.outputLockAspectInput?.checked),
-            qualityScale: Number.isFinite(qualityRaw) ? Math.max(0.25, Math.min(4, qualityRaw)) : 1,
-            fps: Number.isFinite(fpsRaw) ? Math.max(1, Math.min(120, fpsRaw)) : 30,
-            includeAudio: Boolean(this.outputIncludeAudioInput?.checked),
-            webmCodec: (this.outputWebmCodecSelect?.value as "auto" | "vp8" | "vp9" | undefined) ?? "vp9",
+        return this.exportUiController?.exportProjectState() ?? {
+            aspectPreset: "16:9",
+            sizePreset: "1920",
+            width: 1920,
+            height: 1080,
+            lockAspect: false,
+            qualityScale: 1,
+            fps: 30,
+            includeAudio: false,
+            webmCodec: "vp8",
+            webmCaptureMode: "readpixels",
+            startFrame: 0,
+            endFrame: 0,
+            frameStartEnabled: false,
+            frameStopEnabled: false,
         };
     }
 
     private applyOutputProjectState(state: ProjectOutputState | null | undefined): void {
-        if (!state) return;
+        this.exportUiController?.applyProjectState(state);
+    }
 
-        const hasOption = (select: HTMLSelectElement, value: string): boolean =>
-            Array.from(select.options).some((option) => option.value === value);
+    private reapplyImportedLightingState(lighting: Partial<ProjectLightingState> | null | undefined): void {
+        if (!lighting) return;
 
-        if (this.outputAspectSelect && typeof state.aspectPreset === "string" && hasOption(this.outputAspectSelect, state.aspectPreset)) {
-            this.outputAspectSelect.value = state.aspectPreset;
-        }
-        if (this.outputSizePresetSelect && typeof state.sizePreset === "string" && hasOption(this.outputSizePresetSelect, state.sizePreset)) {
-            this.outputSizePresetSelect.value = state.sizePreset;
-        }
-        if (this.outputWidthInput && Number.isFinite(state.width)) {
-            this.outputWidthInput.value = String(this.clampOutputWidth(state.width));
-        }
-        if (this.outputHeightInput && Number.isFinite(state.height)) {
-            this.outputHeightInput.value = String(this.clampOutputHeight(state.height));
-        }
-        if (this.outputLockAspectInput) {
-            this.outputLockAspectInput.checked = Boolean(state.lockAspect);
-        }
         if (
-            this.outputQualitySelect &&
-            Number.isFinite(state.qualityScale) &&
-            hasOption(this.outputQualitySelect, String(state.qualityScale))
+            typeof lighting.x === "number"
+            && Number.isFinite(lighting.x)
+            && typeof lighting.y === "number"
+            && Number.isFinite(lighting.y)
+            && typeof lighting.z === "number"
+            && Number.isFinite(lighting.z)
         ) {
-            this.outputQualitySelect.value = String(state.qualityScale);
-        }
-        if (
-            this.outputFpsSelect &&
-            Number.isFinite(state.fps) &&
-            hasOption(this.outputFpsSelect, String(state.fps))
-        ) {
-            this.outputFpsSelect.value = String(state.fps);
-        }
-        if (this.outputIncludeAudioInput) {
-            this.outputIncludeAudioInput.checked = Boolean(state.includeAudio);
-        }
-        if (
-            this.outputWebmCodecSelect &&
-            typeof state.webmCodec === "string" &&
-            hasOption(this.outputWebmCodecSelect, state.webmCodec)
-        ) {
-            this.outputWebmCodecSelect.value = state.webmCodec;
+            this.mmdManager.setLightDirection(lighting.x, lighting.y, lighting.z);
         }
 
-        const width = this.clampOutputWidth(Number.parseInt(this.outputWidthInput?.value ?? "1920", 10));
-        const height = this.clampOutputHeight(Number.parseInt(this.outputHeightInput?.value ?? "1080", 10));
-        this.outputAspectRatio = height > 0
-            ? Math.max(0.1, width / height)
-            : this.resolveSelectedOutputAspectRatio();
-        this.applyViewportAspectPresentation();
-        this.syncMainWindowPresentationAspect();
+        if (typeof lighting.shadowFrustumSize === "number" && Number.isFinite(lighting.shadowFrustumSize)) {
+            this.mmdManager.shadowFrustumSize = lighting.shadowFrustumSize;
+        }
+        if (typeof lighting.shadowMaxZ === "number" && Number.isFinite(lighting.shadowMaxZ)) {
+            this.mmdManager.shadowMaxZ = lighting.shadowMaxZ;
+        }
     }
 
     private async saveProject(forceChoosePath = false): Promise<void> {
         this.setStatus("Saving project...", true);
         try {
             const project = this.buildProjectStateForPersistence();
-            const lutMode = this.mmdManager.postEffectLutSourceMode;
             let relativeLutFileName: string | null = null;
+            let relativeLutText: string | null = null;
             let relativeWgslFileName: string | null = null;
-            project.effects.lutSourceMode = lutMode;
+            const lutSavePlan = this.lutPanelController?.prepareProjectSave();
+            if (lutSavePlan) {
+                project.effects.lutSourceMode = lutSavePlan.sourceMode;
+                project.effects.lutExternalPath = lutSavePlan.externalPath;
+                relativeLutFileName = lutSavePlan.relativeFileName;
+                relativeLutText = lutSavePlan.externalText;
+                if (lutSavePlan.disableLut) {
+                    project.effects.lutEnabled = false;
+                    this.showToast("External LUT is missing, saving with LUT disabled", "info");
+                }
+            }
             if (!this.postFxWgslToonPath || !this.postFxWgslToonText) {
                 project.effects.wgslToonShaderPath = null;
             } else {
                 relativeWgslFileName = this.getBaseNameForRenderer(this.postFxWgslToonPath) || "external_toon.wgsl";
                 project.effects.wgslToonShaderPath = `wgsl/${relativeWgslFileName}`;
-            }
-            if (lutMode === "builtin") {
-                project.effects.lutExternalPath = null;
-            } else if (!this.postFxLutExternalPath || !this.postFxLutExternalText) {
-                project.effects.lutEnabled = false;
-                project.effects.lutExternalPath = null;
-                this.showToast("External LUT is missing, saving with LUT disabled", "info");
-            } else if (lutMode === "project-relative") {
-                relativeLutFileName = this.getBaseNameForRenderer(this.postFxLutExternalPath) || "external_lut.cube";
-                project.effects.lutExternalPath = `luts/${relativeLutFileName}`;
-            } else {
-                project.effects.lutExternalPath = this.postFxLutExternalPath;
             }
 
             const json = JSON.stringify(project, null, 2);
@@ -2387,11 +1683,11 @@ export class UIController {
                 }
             }
 
-            if (relativeLutFileName && this.postFxLutExternalText) {
+            if (relativeLutFileName && relativeLutText) {
                 const projectDir = this.getDirectoryPathForRenderer(savedPath);
                 const lutDir = this.joinPathForRenderer(projectDir, "luts");
                 const lutPath = this.joinPathForRenderer(lutDir, relativeLutFileName);
-                const wrote = await window.electronAPI.writeTextFileToPath(lutPath, this.postFxLutExternalText);
+                const wrote = await window.electronAPI.writeTextFileToPath(lutPath, relativeLutText);
                 if (!wrote) {
                     this.showToast("Failed to save project-relative LUT file", "error");
                 }
@@ -2464,17 +1760,16 @@ export class UIController {
                     const lutText = await window.electronAPI.readTextFile(resolvedExternalLutPath);
                     if (lutText) {
                         resolvedExternalLutText = lutText;
-                        const imported = await this.importExternalLutFile(
+                        const imported = await this.lutPanelController?.importExternalLutFile(
                             resolvedExternalLutPath,
                             "project",
                             false,
                             lutText,
                             requestedLutMode === "project-relative" ? "project-relative" : "external-absolute",
-                        );
+                        ) ?? false;
                         if (!imported) {
                             resolvedExternalLutText = null;
-                            this.postFxLutExternalRuntimeText = null;
-                            this.mmdManager.setPostEffectExternalLut(null, null, null);
+                            this.lutPanelController?.clearExternalAsset();
                             externalLutWarning = 'External LUT parse failed: ' + requestedLutPath;
                         }
                     } else {
@@ -2491,7 +1786,7 @@ export class UIController {
                     : this.resolveProjectRelativePath(filePath, normalizedPath);
                 const wgslText = await window.electronAPI.readTextFile(resolvedWgslToonPath);
                 if (wgslText) {
-                    const validationError = this.validateExternalWgslToonSnippet(wgslText);
+                    const validationError = this.shaderPanelController?.validateExternalWgslToonSnippet(wgslText) ?? null;
                     if (validationError) {
                         wgslToonWarning = `WGSL shader invalid (${requestedWgslToonPath}): ${validationError}`;
                         resolvedWgslToonPath = null;
@@ -2509,12 +1804,9 @@ export class UIController {
 
             this.postFxWgslToonPath = resolvedWgslToonPath;
             this.postFxWgslToonText = resolvedWgslToonText;
+            this.shaderPanelController?.setExternalWgslToonAsset(resolvedWgslToonPath, resolvedWgslToonText);
             this.mmdManager.setExternalWgslToonShader(resolvedWgslToonPath, resolvedWgslToonText);
-            this.postFxLutExternalPath = resolvedExternalLutPath;
-            this.postFxLutExternalText = resolvedExternalLutText;
-            if (!resolvedExternalLutText) {
-                this.postFxLutExternalRuntimeText = null;
-            }
+            this.lutPanelController?.restoreProjectExternalAsset(resolvedExternalLutPath, resolvedExternalLutText);
             if (isExternalLutMode && !resolvedExternalLutText) {
                 this.mmdManager.postEffectLutEnabled = false;
             }
@@ -2531,8 +1823,8 @@ export class UIController {
             this.applyLocalizedUiState();
             this.refreshCameraUiFromRuntime();
             this.refreshLightingUiFromRuntime();
-            this.refreshPhysicsSimulationRateUi();
-            this.refreshAccessoryPanel();
+            this.runtimeFeatureUiController?.refreshPhysics();
+            this.accessoryPanelController?.refresh();
             if (this.mmdManager.getTimelineTarget() === "camera") {
                 this.applyCameraSelectionUI();
             } else {
@@ -2541,6 +1833,8 @@ export class UIController {
                     this.mmdManager.setActiveModelByIndex(activeModel.index);
                 }
             }
+            this.reapplyImportedLightingState(parsedProject.lighting);
+            this.refreshLightingUiFromRuntime();
             this.updateTimelineEditState();
 
             if (result.warnings.length > 0) {
@@ -2562,7 +1856,7 @@ export class UIController {
 
     private async loadFileFromDialog(): Promise<void> {
         const filePath = await window.electronAPI.openFileDialog([
-            { name: "Supported files", extensions: ["pmx", "pmd", "x", "vmd", "vpd", "mp3", "wav", "ogg"] },
+            { name: "Supported files", extensions: ["pmx", "pmd", "x", "vmd", "vpd", "mp3", "wav", "ogg", "png", "jpg", "jpeg", "bmp", "webp", "webm", "mp4", "avi"] },
             { name: "All files", extensions: ["*"] },
         ]);
 
@@ -2578,121 +1872,6 @@ export class UIController {
         return fileName.substring(dot + 1).toLowerCase();
     }
 
-    private normalizeImportedLutPath(filePath: string): string {
-        return filePath.replace(/[\\/]+/g, "\\").toLowerCase();
-    }
-
-    private escapeHtml(value: string): string {
-        return value
-            .replace(/&/g, '&amp;')
-            .replace(/</g, '&lt;')
-            .replace(/>/g, '&gt;')
-            .replace(/"/g, '&quot;')
-            .replace(/'/g, '&#39;');
-    }
-
-    private getImportedLutEntry(filePath: string): ImportedLutRegistryEntry | null {
-        return this.customLutEntriesByPath.get(this.normalizeImportedLutPath(filePath)) ?? null;
-    }
-
-    private registerImportedLutEntry(filePath: string, normalizedLut: {
-        displayName: string;
-        rawText: string;
-        runtimeText: string;
-        sourceFormat: '3dl' | 'cube';
-    }): ImportedLutRegistryEntry {
-        const entry: ImportedLutRegistryEntry = {
-            sourcePath: filePath,
-            displayName: normalizedLut.displayName,
-            rawText: normalizedLut.rawText,
-            runtimeText: normalizedLut.runtimeText,
-            sourceFormat: normalizedLut.sourceFormat,
-        };
-        this.customLutEntriesByPath.set(this.normalizeImportedLutPath(filePath), entry);
-        return entry;
-    }
-
-    private buildLutPresetOptionsHtml(): string {
-        const importedEntries = Array.from(this.customLutEntriesByPath.values())
-            .sort((a, b) => a.displayName.localeCompare(b.displayName, undefined, { sensitivity: 'base' }) || a.sourcePath.localeCompare(b.sourcePath, undefined, { sensitivity: 'base' }));
-        const labelCounts = new Map<string, number>();
-        const importedOptionsHtml = importedEntries
-            .map((entry) => {
-                const baseName = entry.displayName || this.getBaseNameForRenderer(entry.sourcePath) || t("shader.group.importedLutFallback");
-                const count = (labelCounts.get(baseName) ?? 0) + 1;
-                labelCounts.set(baseName, count);
-                const label = count === 1 ? baseName : baseName + ' (' + count + ')';
-                return '<option value="' + this.escapeHtml(entry.sourcePath) + '">' + this.escapeHtml(label) + '</option>';
-            })
-            .join('');
-        const builtInOptionsHtml = this.mmdManager.getPostEffectLutPresetOptions()
-            .map((preset) => '<option value="' + this.escapeHtml(preset.id) + '">' + this.escapeHtml(preset.label) + '</option>')
-            .join('');
-
-        const importedGroupHtml = importedEntries.length > 0
-            ? '<optgroup label="' + this.escapeHtml(t("shader.group.importedLuts")) + '">' + importedOptionsHtml + '</optgroup>'
-            : '';
-        const builtInGroupHtml = '<optgroup label="' + this.escapeHtml(t("shader.group.builtInLuts")) + '">' + builtInOptionsHtml + '</optgroup>';
-
-        return importedGroupHtml + builtInGroupHtml;
-    }
-
-    private getCurrentLutPresetSelectValue(): string {
-        if (this.mmdManager.postEffectLutSourceMode !== 'builtin') {
-            const activeImportedEntry = this.postFxLutExternalPath ? this.getImportedLutEntry(this.postFxLutExternalPath) : null;
-            if (activeImportedEntry) {
-                return activeImportedEntry.sourcePath;
-            }
-            if (this.postFxLutExternalPath) {
-                return this.postFxLutExternalPath;
-            }
-        }
-        return this.mmdManager.postEffectLutPreset;
-    }
-
-    private async importExternalLutFile(
-        filePath: string,
-        source: 'dialog' | 'drop' | 'project',
-        notify = true,
-        rawTextOverride?: string,
-        sourceModeOverride: 'external-absolute' | 'project-relative' = 'external-absolute',
-    ): Promise<boolean> {
-        const rawText = typeof rawTextOverride === 'string'
-            ? rawTextOverride
-            : await window.electronAPI.readTextFile(filePath);
-        if (!rawText) {
-            if (notify) {
-                this.showToast('Failed to load LUT file', 'error');
-            }
-            return false;
-        }
-
-        let normalizedLut: ReturnType<typeof normalizeLutFile>;
-        try {
-            normalizedLut = normalizeLutFile(filePath, rawText);
-        } catch (err: unknown) {
-            const message = err instanceof Error ? err.message : String(err);
-            if (notify) {
-                this.showToast('Failed to load LUT file: ' + message, 'error');
-            }
-            return false;
-        }
-
-        const entry = this.registerImportedLutEntry(filePath, normalizedLut);
-        this.postFxLutExternalPath = entry.sourcePath;
-        this.postFxLutExternalText = entry.rawText;
-        this.postFxLutExternalRuntimeText = entry.runtimeText;
-        this.mmdManager.setPostEffectExternalLut(entry.sourcePath, entry.runtimeText, entry.sourceFormat);
-        this.mmdManager.postEffectLutSourceMode = sourceModeOverride;
-        if (source !== "project") {
-            this.mmdManager.postEffectLutEnabled = true;
-        }
-        if (notify) {
-            this.showToast('Loaded LUT: ' + this.getBaseNameForRenderer(filePath), 'success');
-        }
-        this.refreshShaderPanel();
-        return true;
-    }
     private isLikelyCameraVmdPath(filePath: string): boolean {
         if (this.mmdManager.getTimelineTarget() === "camera") return true;
         if (this.mmdManager.getLoadedModels().length === 0) return true;
@@ -2714,7 +1893,7 @@ export class UIController {
                 const ok = await this.mmdManager.loadX(filePath);
                 if (ok) {
                     this.setStatus("X model loaded", false);
-                    this.refreshAccessoryPanel();
+                    this.accessoryPanelController?.refresh();
                     this.showToast(`Loaded X model: ${filePath.replace(/^.*[\\/]/, "")}`, "success");
                 } else {
                     this.setStatus("X model load failed", false);
@@ -2724,7 +1903,7 @@ export class UIController {
             case "3dl":
             case "cube":
                 this.setStatus("Loading LUT...", true);
-                if (await this.importExternalLutFile(filePath, source)) {
+                if (await this.lutPanelController?.importExternalLutFile(filePath, source)) {
                     this.setStatus("LUT loaded", false);
                 } else {
                     this.setStatus("LUT load failed", false);
@@ -2757,6 +1936,18 @@ export class UIController {
             case "ogg":
                 this.setStatus("Loading audio...", true);
                 await this.mmdManager.loadMP3(filePath);
+                return;
+            case "png":
+            case "jpg":
+            case "jpeg":
+            case "bmp":
+            case "webp":
+                await this.sceneEnvironmentUiController?.applyBackgroundImage(filePath);
+                return;
+            case "webm":
+            case "mp4":
+            case "avi":
+                await this.sceneEnvironmentUiController?.applyBackgroundVideo(filePath);
                 return;
             case "glb":
                 this.showToast("GLB import is currently disabled", "error");
@@ -2819,315 +2010,6 @@ export class UIController {
         await this.mmdManager.loadMP3(filePath);
     }
 
-    private setupOutputControls(): void {
-        if (
-            !this.outputAspectSelect ||
-            !this.outputSizePresetSelect ||
-            !this.outputWidthInput ||
-            !this.outputHeightInput ||
-            !this.outputQualitySelect ||
-            !this.outputFpsSelect
-        ) {
-            return;
-        }
-
-        const applyPreset = (): void => {
-            const ratio = this.resolveSelectedOutputAspectRatio();
-            const longEdgeRaw = Number.parseInt(this.outputSizePresetSelect?.value ?? "1920", 10);
-            const longEdge = Number.isFinite(longEdgeRaw) ? Math.max(320, Math.min(8192, longEdgeRaw)) : 1920;
-
-            let nextWidth = longEdge;
-            let nextHeight = Math.max(180, Math.round(longEdge / Math.max(0.1, ratio)));
-            if (ratio < 1) {
-                nextHeight = longEdge;
-                nextWidth = Math.max(320, Math.round(longEdge * ratio));
-            }
-
-            this.isSyncingOutputSettings = true;
-            this.outputWidthInput.value = String(this.clampOutputWidth(nextWidth));
-            this.outputHeightInput.value = String(this.clampOutputHeight(nextHeight));
-            this.isSyncingOutputSettings = false;
-
-            const width = Number.parseInt(this.outputWidthInput.value, 10);
-            const height = Number.parseInt(this.outputHeightInput.value, 10);
-            if (Number.isFinite(width) && Number.isFinite(height) && height > 0) {
-                this.outputAspectRatio = Math.max(0.1, width / height);
-            }
-
-            this.applyViewportAspectPresentation();
-            this.syncMainWindowPresentationAspect();
-        };
-
-        const syncDimensionWithLock = (source: "width" | "height"): void => {
-            if (!this.outputWidthInput || !this.outputHeightInput) return;
-            if (this.isSyncingOutputSettings) return;
-
-            let width = this.clampOutputWidth(Number.parseInt(this.outputWidthInput.value, 10));
-            let height = this.clampOutputHeight(Number.parseInt(this.outputHeightInput.value, 10));
-            const locked = this.outputLockAspectInput?.checked === true;
-            const ratio = Math.max(0.1, this.outputAspectRatio);
-
-            if (locked) {
-                if (source === "width") {
-                    height = this.clampOutputHeight(Math.round(width / ratio));
-                } else {
-                    width = this.clampOutputWidth(Math.round(height * ratio));
-                }
-            } else if (height > 0) {
-                this.outputAspectRatio = Math.max(0.1, width / height);
-            }
-
-            this.isSyncingOutputSettings = true;
-            this.outputWidthInput.value = String(width);
-            this.outputHeightInput.value = String(height);
-            this.isSyncingOutputSettings = false;
-        };
-
-        this.outputAspectSelect.addEventListener("change", applyPreset);
-        this.outputSizePresetSelect.addEventListener("change", applyPreset);
-        this.outputWidthInput.addEventListener("input", () => syncDimensionWithLock("width"));
-        this.outputHeightInput.addEventListener("input", () => syncDimensionWithLock("height"));
-        this.outputLockAspectInput?.addEventListener("change", () => {
-            if (!this.outputLockAspectInput) return;
-            if (this.outputLockAspectInput.checked) {
-                this.outputAspectRatio = this.resolveSelectedOutputAspectRatio();
-                syncDimensionWithLock("width");
-            }
-        });
-
-        this.outputQualitySelect.value = this.outputQualitySelect.value || "1";
-        this.outputFpsSelect.value = this.outputFpsSelect.value || "30";
-        this.outputAspectRatio = this.resolveSelectedOutputAspectRatio();
-        applyPreset();
-        this.applyViewportAspectPresentation();
-    }
-
-    private resolveSelectedOutputAspectRatio(): number {
-        if (!this.outputAspectSelect) return this.outputAspectRatio > 0 ? this.outputAspectRatio : 16 / 9;
-        const value = this.outputAspectSelect.value;
-        if (value === "viewport") {
-            const width = this.viewportContainerEl?.clientWidth ?? 0;
-            const height = this.viewportContainerEl?.clientHeight ?? 0;
-            if (width > 0 && height > 0) {
-                return Math.max(0.1, width / height);
-            }
-            return 16 / 9;
-        }
-
-        const parts = value.split(":");
-        if (parts.length === 2) {
-            const w = Number.parseFloat(parts[0]);
-            const h = Number.parseFloat(parts[1]);
-            if (Number.isFinite(w) && Number.isFinite(h) && w > 0 && h > 0) {
-                return Math.max(0.1, w / h);
-            }
-        }
-
-        return this.outputAspectRatio > 0 ? this.outputAspectRatio : 16 / 9;
-    }
-
-    private getOutputSettings(): OutputSettings {
-        const widthRaw = Number.parseInt(this.outputWidthInput?.value ?? "1920", 10);
-        const heightRaw = Number.parseInt(this.outputHeightInput?.value ?? "1080", 10);
-        const qualityRaw = Number.parseFloat(this.outputQualitySelect?.value ?? "1");
-        const fpsRaw = Number.parseInt(this.outputFpsSelect?.value ?? "30", 10);
-
-        return {
-            width: this.clampOutputWidth(widthRaw),
-            height: this.clampOutputHeight(heightRaw),
-            qualityScale: Number.isFinite(qualityRaw) ? Math.max(0.25, Math.min(4, qualityRaw)) : 1,
-            fps: Number.isFinite(fpsRaw) ? Math.max(1, Math.min(120, fpsRaw)) : 30,
-        };
-    }
-
-    private clampOutputWidth(value: number): number {
-        if (!Number.isFinite(value)) return 1920;
-        return Math.max(320, Math.min(8192, Math.round(value)));
-    }
-
-    private clampOutputHeight(value: number): number {
-        if (!Number.isFinite(value)) return 1080;
-        return Math.max(180, Math.min(8192, Math.round(value)));
-    }
-
-    private async exportPNG(): Promise<void> {
-        this.setStatus("Exporting PNG...", true);
-
-        const outputSettings = this.getOutputSettings();
-        const captureWidth = Math.max(320, Math.round(outputSettings.width * outputSettings.qualityScale));
-        const captureHeight = Math.max(180, Math.round(outputSettings.height * outputSettings.qualityScale));
-        const dataUrl = await this.mmdManager.capturePngDataUrl({
-            width: captureWidth,
-            height: captureHeight,
-            precision: 1,
-        });
-        if (!dataUrl) {
-            this.setStatus("PNG export failed", false);
-            return;
-        }
-
-        const now = new Date();
-        const pad = (v: number) => String(v).padStart(2, "0");
-        const fileName = `mmd_capture_${captureWidth}x${captureHeight}_${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}.png`;
-
-        const savedPath = await window.electronAPI.savePngFile(dataUrl, fileName);
-        if (!savedPath) {
-            this.setStatus("Ready", false);
-            this.showToast("PNG export canceled", "info");
-            return;
-        }
-
-        const basename = savedPath.replace(/^.*[\\/]/, "");
-        this.setStatus("PNG saved", false);
-        this.showToast(`Saved PNG: ${basename}`, "success");
-    }
-
-    private async exportPNGSequence(): Promise<void> {
-        const directoryPath = await window.electronAPI.openDirectoryDialog();
-        if (!directoryPath) {
-            this.showToast("PNG sequence export canceled", "info");
-            return;
-        }
-
-        const startFrame = Math.max(0, this.mmdManager.currentFrame);
-        const endFrame = Math.max(startFrame, this.mmdManager.totalFrames);
-        const step = 1;
-        const outputSettings = this.getOutputSettings();
-        const prefix = `mmd_seq_${outputSettings.width}x${outputSettings.height}`;
-
-        const frameList: number[] = [];
-        for (let frame = startFrame; frame <= endFrame; frame += step) {
-            frameList.push(frame);
-        }
-        if (frameList.length === 0) {
-            this.showToast("No frames to export", "error");
-            return;
-        }
-
-        const outputFolderName = this.buildPngSequenceFolderName(
-            prefix,
-            startFrame,
-            endFrame,
-            step
-        );
-        const outputDirectoryPath = this.joinPathForRenderer(directoryPath, outputFolderName);
-
-        const project = this.buildProjectStateForPersistence();
-        project.assets.audioPath = null;
-
-        this.setStatus("Launching PNG sequence export window...", true);
-        const result = await window.electronAPI.startPngSequenceExportWindow({
-            project,
-            outputDirectoryPath,
-            startFrame,
-            endFrame,
-            step,
-            prefix,
-            fps: outputSettings.fps,
-            precision: outputSettings.qualityScale,
-            outputWidth: outputSettings.width,
-            outputHeight: outputSettings.height,
-        });
-
-        if (!result) {
-            this.setStatus("PNG sequence export launch failed", false);
-            this.showToast("Failed to start PNG sequence export window", "error");
-            return;
-        }
-
-        this.setStatus("PNG sequence export started", false);
-        this.showToast(`PNG sequence export started (${frameList.length} files)`, "success");
-    }
-
-    private async exportWebm(): Promise<void> {
-        if (!window.isSecureContext) {
-            this.showToast("WebM export requires a secure context", "error");
-            return;
-        }
-
-        const startFrame = Math.max(0, this.mmdManager.currentFrame);
-        const endFrame = Math.max(startFrame, this.mmdManager.totalFrames);
-        const totalTimelineFrames = endFrame - startFrame + 1;
-        if (totalTimelineFrames <= 0) {
-            this.showToast("No frames to export", "error");
-            return;
-        }
-
-        const outputSettings = this.getOutputSettings();
-        const totalOutputFrames = Math.max(1, Math.round((totalTimelineFrames / 30) * outputSettings.fps));
-        const defaultFileName = this.buildWebmFileName(
-            outputSettings.width,
-            outputSettings.height,
-            startFrame,
-            endFrame,
-        );
-        const outputFilePath = await window.electronAPI.saveWebmDialog(defaultFileName);
-        if (!outputFilePath) {
-            this.showToast(t("toast.webmExportCanceled"), "info");
-            return;
-        }
-
-        const project = this.buildProjectStateForPersistence();
-        const audioFilePath = project.assets.audioPath;
-        const includeAudio = Boolean(this.outputIncludeAudioInput?.checked) && typeof audioFilePath === "string" && audioFilePath.length > 0;
-        const preferredVideoCodec = (this.outputWebmCodecSelect?.value as "auto" | "vp8" | "vp9" | undefined) ?? "vp9";
-        if (Boolean(this.outputIncludeAudioInput?.checked) && !includeAudio) {
-            this.showToast(t("toast.audioMissingForWebm"), "info");
-        }
-        project.assets.audioPath = null;
-
-        this.setStatus(t("busy.webmExportLaunching"), true);
-        const result = await window.electronAPI.startWebmExportWindow({
-            project,
-            outputFilePath,
-            startFrame,
-            endFrame,
-            fps: outputSettings.fps,
-            outputWidth: outputSettings.width,
-            outputHeight: outputSettings.height,
-            includeAudio,
-            audioFilePath: includeAudio ? audioFilePath : null,
-            preferredVideoCodec,
-        });
-
-        if (!result) {
-            this.setStatus("WebM export launch failed", false);
-            this.showToast("Failed to start WebM export window", "error");
-            return;
-        }
-
-        this.setStatus("WebM export started", false);
-        this.showToast(`WebM export started (${totalOutputFrames} frames)`, "success");
-    }
-
-    private sanitizeFileNameSegment(value: string): string {
-        const source = value.replace(/\s+/g, "_");
-        let sanitized = "";
-        for (const ch of source) {
-            const code = ch.charCodeAt(0);
-            if (code <= 31 || '<>:"/\\|?*'.includes(ch)) {
-                sanitized += "_";
-            } else {
-                sanitized += ch;
-            }
-        }
-        return sanitized.length > 0 ? sanitized : "mmd_seq";
-    }
-
-    private buildPngSequenceFolderName(prefix: string, startFrame: number, endFrame: number, step: number): string {
-        const now = new Date();
-        const pad = (value: number): string => String(value).padStart(2, "0");
-        const timestamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
-        return this.sanitizeFileNameSegment(`${prefix}_${timestamp}_${startFrame}-${endFrame}_s${step}`);
-    }
-
-    private buildWebmFileName(width: number, height: number, startFrame: number, endFrame: number): string {
-        const now = new Date();
-        const pad = (value: number): string => String(value).padStart(2, "0");
-        const timestamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
-        return `${this.sanitizeFileNameSegment(`mmd_capture_${width}x${height}_${timestamp}_${startFrame}-${endFrame}`)}.webm`;
-    }
-
     private joinPathForRenderer(basePath: string, childName: string): string {
         const separator = basePath.includes("\\") ? "\\" : "/";
         const normalizedBase = basePath.replace(/[\\/]+$/, "");
@@ -3164,59 +2046,11 @@ export class UIController {
         return this.joinPathForRenderer(projectDir, normalizedRelative.replace(/\//g, "\\"));
     }
 
-    private makeExternalWgslPresetValue(filePath: string): string {
-        return `${UIController.EXTERNAL_WGSL_PRESET_PREFIX}${filePath}`;
-    }
-
-    private parseExternalWgslPresetPath(value: string): string | null {
-        if (!value.startsWith(UIController.EXTERNAL_WGSL_PRESET_PREFIX)) {
-            return null;
-        }
-        const path = value.slice(UIController.EXTERNAL_WGSL_PRESET_PREFIX.length).trim();
-        return path.length > 0 ? path : null;
-    }
-
-    private validateExternalWgslToonSnippet(source: string): string | null {
-        const text = source.trim();
-        if (text.length === 0) {
-            return "WGSL shader file is empty";
-        }
-        if (/\bfragmentOutputs\b/.test(text)) {
-            return "WGSL snippet must not include fragmentOutputs";
-        }
-        if (/\breturn\b/.test(text)) {
-            return "WGSL snippet must not contain return statements";
-        }
-        if (/@fragment\b|@vertex\b/.test(text) || /\bfn\s+[A-Za-z_][A-Za-z0-9_]*\s*\(/.test(text)) {
-            return "Use a toon snippet, not a full WGSL module";
-        }
-        if (!/diffuseBase\s*\+=/.test(text)) {
-            return "WGSL snippet must write to diffuseBase";
-        }
-        return null;
-    }
-
     private isSamePathForRenderer(a: string, b: string): boolean {
         const norm = (v: string): string => v.replace(/[\\/]+/g, "\\").toLowerCase();
         return norm(a) === norm(b);
     }
-    private async reloadBundledWgslShaderFiles(triggerRefresh = true): Promise<void> {
-        if (this.bundledWgslScanInFlight) {
-            return;
-        }
-        this.bundledWgslScanInFlight = true;
-        try {
-            this.bundledWgslShaderFiles = await window.electronAPI.listBundledWgslFiles();
-        } catch {
-            this.bundledWgslShaderFiles = [];
-        } finally {
-            this.bundledWgslScanInFlight = false;
-            this.bundledWgslLastScanMs = Date.now();
-        }
-        if (triggerRefresh) {
-            this.refreshShaderPanel();
-        }
-    }
+
     private getCameraPanelInfo(): ModelInfo {
         return {
             name: "Camera",
@@ -3256,72 +2090,28 @@ export class UIController {
     }
 
     private updateInfoActionButtons(): void {
-        const isModelTarget = this.mmdManager.getTimelineTarget() === "model";
-        const hasModel = this.mmdManager.getLoadedModels().length > 0;
-        const enabled = isModelTarget && hasModel;
-
-        this.btnModelVisibility.disabled = !enabled;
-        this.btnModelDelete.disabled = !enabled;
-
-        if (!enabled) {
-            this.btnModelVisibility.textContent = t("button.hide");
-            this.updateSectionKeyframeButtons();
-            return;
-        }
-
-        const visible = this.mmdManager.getActiveModelVisibility();
-        this.btnModelVisibility.textContent = visible ? t("button.hide") : t("button.show");
+        this.modelInfoPanelController?.updateActionButtons();
         this.updateSectionKeyframeButtons();
     }
 
     private refreshModelSelector(): void {
-        const models = this.mmdManager.getLoadedModels();
-        const timelineTarget = this.mmdManager.getTimelineTarget();
-        this.modelSelect.innerHTML = "";
-
-        const cameraOption = document.createElement("option");
-        cameraOption.value = UIController.CAMERA_SELECT_VALUE;
-        cameraOption.textContent = "0: Camera";
-        this.modelSelect.appendChild(cameraOption);
-
-        let selected = false;
-        if (timelineTarget === "camera") {
-            cameraOption.selected = true;
-            selected = true;
-        }
-
-        for (const model of models) {
-            const option = document.createElement("option");
-            option.value = String(model.index);
-            option.textContent = `${model.index + 1}: ${model.name}`;
-            option.title = model.path;
-            if (!selected && timelineTarget === "model" && model.active) {
-                option.selected = true;
-                selected = true;
-            }
-            this.modelSelect.appendChild(option);
-        }
-
-        if (!selected) {
-            cameraOption.selected = true;
-        }
-
-        this.modelSelect.disabled = models.length === 0;
-        this.syncShaderModelSelectorFromInfo();
+        this.modelInfoPanelController?.refresh();
+        this.shaderPanelController?.syncModelSelectorFromInfo();
         this.updateInfoActionButtons();
-        this.updateRigidBodyToggleButton();
-        this.refreshAccessoryPanel();
+        this.runtimeFeatureUiController?.refreshRigidBodies();
+        this.accessoryPanelController?.refresh();
     }
 
-    private syncShaderModelSelectorFromInfo(): void {
-        if (!this.shaderModelSelect) return;
-        this.shaderModelSelect.innerHTML = this.modelSelect.innerHTML;
-        this.shaderModelSelect.value = this.modelSelect.value;
-        this.shaderModelSelect.disabled = this.modelSelect.disabled;
+    private getInfoModelSelectState(): ModelInfoSelectState {
+        return this.modelInfoPanelController?.getSelectState() ?? {
+            innerHTML: '<option value="">-</option>',
+            value: "",
+            disabled: true,
+        };
     }
 
     private handleModelTargetSelection(value: string, showToast: boolean): void {
-        if (value === UIController.CAMERA_SELECT_VALUE) {
+        if (value === MODEL_INFO_CAMERA_SELECT_VALUE) {
             this.mmdManager.setTimelineTarget("camera");
             this.applyCameraSelectionUI();
             this.refreshModelSelector();
@@ -3349,347 +2139,6 @@ export class UIController {
         if (showToast) {
             this.showToast("Active model switched", "success");
         }
-    }
-
-    private setupAccessoryControls(): void {
-        const select = this.accessorySelect;
-        const parentModelSelect = this.accessoryParentModelSelect;
-        const parentBoneSelect = this.accessoryParentBoneSelect;
-        const btnVisibility = this.btnAccessoryVisibility;
-        const btnDelete = this.btnAccessoryDelete;
-
-        const registerSlider = (
-            key: AccessoryTransformSliderKey,
-            sliderId: string,
-            valueId: string,
-        ): void => {
-            const slider = document.getElementById(sliderId) as HTMLInputElement | null;
-            const valueEl = document.getElementById(valueId);
-            if (!slider || !valueEl) return;
-            this.accessoryTransformSliders.set(key, slider);
-            this.accessoryTransformValueEls.set(key, valueEl);
-
-            slider.addEventListener("input", () => {
-                this.updateAccessoryValueLabelsFromSliders();
-                if (this.isSyncingAccessoryUi) return;
-
-                const selectedIndex = this.getSelectedAccessoryIndex();
-                if (selectedIndex === null) return;
-
-                const position = {
-                    x: Number(this.accessoryTransformSliders.get("px")?.value ?? 0),
-                    y: Number(this.accessoryTransformSliders.get("py")?.value ?? 0),
-                    z: Number(this.accessoryTransformSliders.get("pz")?.value ?? 0),
-                };
-                const rotationDeg = {
-                    x: Number(this.accessoryTransformSliders.get("rx")?.value ?? 0),
-                    y: Number(this.accessoryTransformSliders.get("ry")?.value ?? 0),
-                    z: Number(this.accessoryTransformSliders.get("rz")?.value ?? 0),
-                };
-                const scalePercent = Number(this.accessoryTransformSliders.get("s")?.value ?? 100);
-
-                this.mmdManager.setAccessoryTransform(selectedIndex, {
-                    position,
-                    rotationDeg,
-                    scale: scalePercent / 100,
-                });
-                this.markSectionKeyframeDirty("accessory", this.getAccessoryKeyframeContextKey(selectedIndex));
-                this.updateSectionKeyframeButtons();
-            });
-        };
-
-        registerSlider("px", "accessory-pos-x", "accessory-pos-x-val");
-        registerSlider("py", "accessory-pos-y", "accessory-pos-y-val");
-        registerSlider("pz", "accessory-pos-z", "accessory-pos-z-val");
-        registerSlider("rx", "accessory-rot-x", "accessory-rot-x-val");
-        registerSlider("ry", "accessory-rot-y", "accessory-rot-y-val");
-        registerSlider("rz", "accessory-rot-z", "accessory-rot-z-val");
-        registerSlider("s", "accessory-scale", "accessory-scale-val");
-
-        select?.addEventListener("change", () => {
-            this.syncAccessoryTransformSlidersFromSelection();
-            this.syncAccessoryParentControlsFromSelection();
-            this.updateAccessoryActionButtons();
-            this.updateSectionKeyframeButtons();
-        });
-
-        parentModelSelect?.addEventListener("change", () => {
-            if (this.isSyncingAccessoryParentUi) return;
-            const selectedIndex = this.getSelectedAccessoryIndex();
-            if (selectedIndex === null) return;
-
-            const modelIndex = this.parseAccessoryParentModelIndex();
-            this.refreshAccessoryParentBoneOptions(modelIndex, null);
-            this.mmdManager.setAccessoryParent(selectedIndex, modelIndex, null);
-        });
-
-        parentBoneSelect?.addEventListener("change", () => {
-            if (this.isSyncingAccessoryParentUi) return;
-            const selectedIndex = this.getSelectedAccessoryIndex();
-            if (selectedIndex === null) return;
-
-            const modelIndex = this.parseAccessoryParentModelIndex();
-            if (modelIndex === null) {
-                this.mmdManager.setAccessoryParent(selectedIndex, null, null);
-                return;
-            }
-
-            const boneName = parentBoneSelect.value || null;
-            this.mmdManager.setAccessoryParent(selectedIndex, modelIndex, boneName);
-        });
-
-        btnVisibility?.addEventListener("click", () => {
-            const selectedIndex = this.getSelectedAccessoryIndex();
-            if (selectedIndex === null) return;
-            const visible = this.mmdManager.toggleAccessoryVisibility(selectedIndex);
-            this.updateAccessoryActionButtons();
-            this.showToast(visible ? "Accessory visible" : "Accessory hidden", "info");
-        });
-
-        btnDelete?.addEventListener("click", () => {
-            const selectedIndex = this.getSelectedAccessoryIndex();
-            if (selectedIndex === null) return;
-
-            const accessories = this.mmdManager.getLoadedAccessories();
-            const current = accessories.find((item) => item.index === selectedIndex);
-            const targetName = current?.name ?? "Accessory";
-
-            const ok = window.confirm(`Delete accessory '${targetName}'?`);
-            if (!ok) return;
-
-            const removed = this.mmdManager.removeAccessory(selectedIndex);
-            if (!removed) {
-                this.showToast("Failed to delete accessory", "error");
-                return;
-            }
-
-            this.refreshAccessoryPanel();
-            this.showToast(`Accessory deleted: ${targetName}`, "success");
-        });
-
-        this.updateAccessoryValueLabelsFromSliders();
-        this.setAccessoryTransformControlsEnabled(false);
-        this.setAccessoryParentControlsEnabled(false);
-        this.updateAccessoryActionButtons();
-        this.updateSectionKeyframeButtons();
-    }
-
-    private refreshAccessoryPanel(): void {
-        const select = this.accessorySelect;
-        if (!select) return;
-
-        const accessories = this.mmdManager.getLoadedAccessories();
-        const previousValue = select.value;
-        select.innerHTML = "";
-
-        for (const accessory of accessories) {
-            const option = document.createElement("option");
-            option.value = String(accessory.index);
-            const kindLabel = accessory.kind === "glb" ? " [GLB]" : "";
-            option.textContent = `${accessory.index + 1}: ${accessory.name}${kindLabel}`;
-            option.title = accessory.path;
-            select.appendChild(option);
-        }
-
-        if (accessories.length === 0) {
-            const option = document.createElement("option");
-            option.value = "";
-            option.textContent = "-";
-            select.appendChild(option);
-        } else {
-            const restore = accessories.find((item) => String(item.index) === previousValue);
-            select.value = restore ? String(restore.index) : "0";
-        }
-
-        select.disabled = accessories.length === 0;
-        this.accessoryEmptyStateEl?.classList.toggle("hidden", accessories.length > 0);
-        this.setAccessoryTransformControlsEnabled(accessories.length > 0);
-        this.refreshAccessoryParentModelOptions();
-        this.syncAccessoryParentControlsFromSelection();
-        this.syncAccessoryTransformSlidersFromSelection();
-        this.updateAccessoryActionButtons();
-        this.updateSectionKeyframeButtons();
-    }
-
-    private getSelectedAccessoryIndex(): number | null {
-        const select = this.accessorySelect;
-        if (!select || select.disabled) return null;
-        const parsed = Number.parseInt(select.value, 10);
-        if (Number.isNaN(parsed)) return null;
-        return parsed;
-    }
-
-    private setAccessoryTransformControlsEnabled(enabled: boolean): void {
-        for (const slider of this.accessoryTransformSliders.values()) {
-            slider.disabled = !enabled;
-            this.syncRangeNumberInput(slider);
-        }
-    }
-
-    private setAccessoryParentControlsEnabled(enabled: boolean): void {
-        if (this.accessoryParentModelSelect) {
-            this.accessoryParentModelSelect.disabled = !enabled;
-        }
-        if (this.accessoryParentBoneSelect) {
-            this.accessoryParentBoneSelect.disabled = !enabled;
-        }
-    }
-
-    private parseAccessoryParentModelIndex(): number | null {
-        const select = this.accessoryParentModelSelect;
-        if (!select) return null;
-        const value = select.value;
-        if (value === "") return null;
-        const parsed = Number.parseInt(value, 10);
-        if (Number.isNaN(parsed)) return null;
-        return parsed;
-    }
-
-    private refreshAccessoryParentModelOptions(): void {
-        const select = this.accessoryParentModelSelect;
-        if (!select) return;
-
-        const previousValue = select.value;
-        const models = this.mmdManager.getLoadedModels();
-        select.innerHTML = "";
-
-        const worldOption = document.createElement("option");
-        worldOption.value = "";
-        worldOption.textContent = "World";
-        select.appendChild(worldOption);
-
-        for (const model of models) {
-            const option = document.createElement("option");
-            option.value = String(model.index);
-            option.textContent = `${model.index + 1}: ${model.name}`;
-            option.title = model.path;
-            select.appendChild(option);
-        }
-
-        const hasPrevious = Array.from(select.options).some((option) => option.value === previousValue);
-        select.value = hasPrevious ? previousValue : "";
-    }
-
-    private refreshAccessoryParentBoneOptions(modelIndex: number | null, selectedBoneName: string | null): void {
-        const select = this.accessoryParentBoneSelect;
-        if (!select) return;
-
-        select.innerHTML = "";
-
-        if (modelIndex === null) {
-            const option = document.createElement("option");
-            option.value = "";
-            option.textContent = "-";
-            select.appendChild(option);
-            select.value = "";
-            select.disabled = true;
-            return;
-        }
-
-        const modelOption = document.createElement("option");
-        modelOption.value = "";
-        modelOption.textContent = "(ãƒ¢ãƒEƒ«ä¸­å¿E";
-        select.appendChild(modelOption);
-
-        const boneNames = this.mmdManager.getModelBoneNames(modelIndex);
-        for (const boneName of boneNames) {
-            const option = document.createElement("option");
-            option.value = boneName;
-            option.textContent = boneName;
-            select.appendChild(option);
-        }
-
-        const target = selectedBoneName ?? "";
-        const hasTarget = Array.from(select.options).some((option) => option.value === target);
-        select.value = hasTarget ? target : "";
-        select.disabled = false;
-    }
-
-    private syncAccessoryParentControlsFromSelection(): void {
-        const selectedIndex = this.getSelectedAccessoryIndex();
-        if (selectedIndex === null) {
-            this.isSyncingAccessoryParentUi = true;
-            try {
-                if (this.accessoryParentModelSelect) this.accessoryParentModelSelect.value = "";
-                this.refreshAccessoryParentBoneOptions(null, null);
-                this.setAccessoryParentControlsEnabled(false);
-            } finally {
-                this.isSyncingAccessoryParentUi = false;
-            }
-            return;
-        }
-
-        const parentState = this.mmdManager.getAccessoryParent(selectedIndex);
-        const modelIndex = parentState?.modelIndex ?? null;
-        const boneName = parentState?.boneName ?? null;
-
-        this.isSyncingAccessoryParentUi = true;
-        try {
-            this.setAccessoryParentControlsEnabled(true);
-            if (this.accessoryParentModelSelect) {
-                const modelValue = modelIndex === null ? "" : String(modelIndex);
-                const hasValue = Array.from(this.accessoryParentModelSelect.options)
-                    .some((option) => option.value === modelValue);
-                this.accessoryParentModelSelect.value = hasValue ? modelValue : "";
-            }
-            this.refreshAccessoryParentBoneOptions(modelIndex, boneName);
-        } finally {
-            this.isSyncingAccessoryParentUi = false;
-        }
-    }
-
-    private syncAccessoryTransformSlidersFromSelection(): void {
-        const selectedIndex = this.getSelectedAccessoryIndex();
-        if (selectedIndex === null) {
-            this.resetAccessoryTransformSliders();
-            return;
-        }
-
-        const transform = this.mmdManager.getAccessoryTransform(selectedIndex);
-        if (!transform) {
-            this.resetAccessoryTransformSliders();
-            return;
-        }
-
-        this.isSyncingAccessoryUi = true;
-        try {
-            this.setSliderValueClamped("px", transform.position.x);
-            this.setSliderValueClamped("py", transform.position.y);
-            this.setSliderValueClamped("pz", transform.position.z);
-            this.setSliderValueClamped("rx", transform.rotationDeg.x);
-            this.setSliderValueClamped("ry", transform.rotationDeg.y);
-            this.setSliderValueClamped("rz", transform.rotationDeg.z);
-            this.setSliderValueClamped("s", transform.scale * 100);
-            this.updateAccessoryValueLabelsFromSliders();
-        } finally {
-            this.isSyncingAccessoryUi = false;
-        }
-    }
-
-    private resetAccessoryTransformSliders(): void {
-        this.isSyncingAccessoryUi = true;
-        try {
-            this.setSliderValueClamped("px", 0);
-            this.setSliderValueClamped("py", 0);
-            this.setSliderValueClamped("pz", 0);
-            this.setSliderValueClamped("rx", 0);
-            this.setSliderValueClamped("ry", 0);
-            this.setSliderValueClamped("rz", 0);
-            this.setSliderValueClamped("s", 100);
-            this.updateAccessoryValueLabelsFromSliders();
-        } finally {
-            this.isSyncingAccessoryUi = false;
-        }
-    }
-
-    private setSliderValueClamped(key: AccessoryTransformSliderKey, value: number): void {
-        const slider = this.accessoryTransformSliders.get(key);
-        if (!slider || !Number.isFinite(value)) return;
-        const min = Number(slider.min);
-        const max = Number(slider.max);
-        const clamped = Math.max(min, Math.min(max, value));
-        slider.value = String(clamped);
-        this.syncRangeNumberInput(slider);
     }
 
     private installRangeNumberInputs(root: ParentNode = document): void {
@@ -3843,597 +2292,16 @@ export class UIController {
         return decimalIndex >= 0 ? normalized.length - decimalIndex - 1 : 0;
     }
 
-    private updateAccessoryValueLabelsFromSliders(): void {
-        const getValue = (key: AccessoryTransformSliderKey): number =>
-            Number(this.accessoryTransformSliders.get(key)?.value ?? 0);
-
-        const px = getValue("px");
-        const py = getValue("py");
-        const pz = getValue("pz");
-        const rx = getValue("rx");
-        const ry = getValue("ry");
-        const rz = getValue("rz");
-        const s = getValue("s");
-
-        const setText = (key: AccessoryTransformSliderKey, text: string): void => {
-            const valueEl = this.accessoryTransformValueEls.get(key);
-            if (valueEl) valueEl.textContent = text;
-        };
-
-        setText("px", px.toFixed(2));
-        setText("py", py.toFixed(2));
-        setText("pz", pz.toFixed(2));
-        setText("rx", `${rx.toFixed(1)}°`);
-        setText("ry", `${ry.toFixed(1)}°`);
-        setText("rz", `${rz.toFixed(1)}°`);
-        setText("s", `${Math.round(s)}%`);
-    }
-
-    private updateAccessoryActionButtons(): void {
-        const btnVisibility = this.btnAccessoryVisibility;
-        const btnDelete = this.btnAccessoryDelete;
-        if (!btnVisibility || !btnDelete) return;
-
-        const selectedIndex = this.getSelectedAccessoryIndex();
-        const enabled = selectedIndex !== null;
-        btnVisibility.disabled = !enabled;
-        btnDelete.disabled = !enabled;
-
-        if (!enabled) {
-            btnVisibility.textContent = t("button.hide");
-            return;
-        }
-
-        const accessories = this.mmdManager.getLoadedAccessories();
-        const current = accessories.find((item) => item.index === selectedIndex);
-        const visible = current?.visible ?? true;
-        btnVisibility.textContent = visible ? t("button.hide") : t("button.show");
-    }
-
-    private isShaderPanelExpanded(): boolean {
-        return !this.mainContentEl.classList.contains("shader-panel-collapsed");
-    }
-
-    private setShaderPanelVisible(visible: boolean): void {
-        this.mainContentEl.classList.toggle("shader-panel-collapsed", !visible);
-        this.clampTimelineWidthToLayout();
-        this.clampShaderWidthToLayout();
-        this.applyViewportAspectPresentation();
-        this.updateShaderPanelToggleButton(visible);
-    }
-
-    private updateShaderPanelToggleButton(visible: boolean): void {
-        if (!this.btnToggleShaderPanel) return;
-        this.btnToggleShaderPanel.setAttribute("aria-pressed", visible ? "true" : "false");
-        this.btnToggleShaderPanel.classList.toggle("toggle-on", visible);
-        this.btnToggleShaderPanel.title = visible
-            ? t("toolbar.fx.title.on")
-            : t("toolbar.fx.title.off");
-        if (this.shaderPanelToggleText) {
-            this.shaderPanelToggleText.textContent = t("toolbar.fx.short");
-        }
-    }
-
-    private toggleUiFullscreenMode(): void {
-        if (this.isUiFullscreenActive) {
-            this.exitUiFullscreenMode();
-            return;
-        }
-        this.enterUiFullscreenMode();
-    }
-
-    private enterUiFullscreenMode(): void {
-        this.setUiFullscreenVisualState(true);
-        this.showToast(t("toast.ui.hidden"), "info");
-    }
-
-    private exitUiFullscreenMode(): void {
-        this.setUiFullscreenVisualState(false);
-    }
-
-    private setUiFullscreenVisualState(active: boolean): void {
-        this.isUiFullscreenActive = active;
-        this.appRootEl.classList.toggle("ui-presentation-mode", active);
-        this.updateFullscreenUiToggleButton(active);
-        this.syncMainWindowPresentationAspect();
-    }
-
-    private updateFullscreenUiToggleButton(active: boolean): void {
-        if (!this.btnToggleFullscreenUi) return;
-        this.btnToggleFullscreenUi.setAttribute("aria-pressed", active ? "true" : "false");
-        this.btnToggleFullscreenUi.classList.toggle("toggle-on", active);
-        this.btnToggleFullscreenUi.title = active
-            ? t("toolbar.ui.title.on")
-            : t("toolbar.ui.title.off");
-        if (this.fullscreenUiToggleText) {
-            this.fullscreenUiToggleText.textContent = t("toolbar.ui.short");
-        }
-    }
-
-    private setupTimelineResizer(): void {
-        if (!this.timelineResizerEl || !this.timelinePanelEl) return;
-
-        let startX = 0;
-        let startWidth = 0;
-
-        const stopResize = (): void => {
-            if (!this.isTimelineResizing) return;
-            this.isTimelineResizing = false;
-            document.body.classList.remove("timeline-resizing");
-            window.removeEventListener("pointermove", onPointerMove);
-            window.removeEventListener("pointerup", onPointerUp);
-            window.removeEventListener("pointercancel", onPointerUp);
-        };
-
-        const onPointerMove = (event: PointerEvent): void => {
-            if (!this.isTimelineResizing) return;
-
-            const delta = event.clientX - startX;
-            const maxWidth = this.computeTimelineMaxWidth();
-            const nextWidth = Math.max(
-                UIController.MIN_TIMELINE_WIDTH,
-                Math.min(maxWidth, startWidth + delta)
-            );
-
-            document.documentElement.style.setProperty("--timeline-width", `${Math.round(nextWidth)}px`);
-            this.applyViewportAspectPresentation();
-        };
-
-        const onPointerUp = (): void => {
-            stopResize();
-        };
-
-        this.timelineResizerEl.addEventListener("pointerdown", (event: PointerEvent) => {
-            if (event.button !== 0) return;
-            event.preventDefault();
-            startX = event.clientX;
-            startWidth = this.timelinePanelEl?.getBoundingClientRect().width ?? UIController.MIN_TIMELINE_WIDTH;
-            this.isTimelineResizing = true;
-            document.body.classList.add("timeline-resizing");
-            window.addEventListener("pointermove", onPointerMove);
-            window.addEventListener("pointerup", onPointerUp);
-            window.addEventListener("pointercancel", onPointerUp);
-        });
-
-        window.addEventListener("resize", () => {
-            this.clampTimelineWidthToLayout();
-            this.clampShaderWidthToLayout();
-            this.clampBottomPanelHeightToLayout();
-            this.applyViewportAspectPresentation();
-            this.syncMainWindowPresentationAspect();
-        });
-    }
-
-    private setupShaderResizer(): void {
-        if (!this.shaderResizerEl || !this.shaderPanelEl) return;
-
-        let startX = 0;
-        let startWidth = 0;
-
-        const stopResize = (): void => {
-            if (!this.isShaderResizing) return;
-            this.isShaderResizing = false;
-            document.body.classList.remove("shader-resizing");
-            window.removeEventListener("pointermove", onPointerMove);
-            window.removeEventListener("pointerup", onPointerUp);
-            window.removeEventListener("pointercancel", onPointerUp);
-        };
-
-        const onPointerMove = (event: PointerEvent): void => {
-            if (!this.isShaderResizing || !this.isShaderPanelExpanded()) return;
-
-            const delta = startX - event.clientX;
-            const maxWidth = this.computeShaderMaxWidth();
-            const nextWidth = Math.max(
-                UIController.MIN_SHADER_PANEL_WIDTH,
-                Math.min(maxWidth, startWidth + delta)
-            );
-
-            document.documentElement.style.setProperty("--shader-panel-width", `${Math.round(nextWidth)}px`);
-            this.applyViewportAspectPresentation();
-        };
-
-        const onPointerUp = (): void => {
-            stopResize();
-        };
-
-        this.shaderResizerEl.addEventListener("pointerdown", (event: PointerEvent) => {
-            if (event.button !== 0 || !this.isShaderPanelExpanded()) return;
-            event.preventDefault();
-            startX = event.clientX;
-            startWidth = this.shaderPanelEl?.getBoundingClientRect().width ?? UIController.MIN_SHADER_PANEL_WIDTH;
-            this.isShaderResizing = true;
-            document.body.classList.add("shader-resizing");
-            window.addEventListener("pointermove", onPointerMove);
-            window.addEventListener("pointerup", onPointerUp);
-            window.addEventListener("pointercancel", onPointerUp);
-        });
-    }
-
-    private setupBottomPanelResizer(): void {
-        if (!this.bottomPanelResizerEl || !this.bottomPanelEl) return;
-
-        let startY = 0;
-        let startHeight = 0;
-
-        const stopResize = (): void => {
-            if (!this.isBottomPanelResizing) return;
-            this.isBottomPanelResizing = false;
-            document.body.classList.remove("bottom-panel-resizing");
-            window.removeEventListener("pointermove", onPointerMove);
-            window.removeEventListener("pointerup", onPointerUp);
-            window.removeEventListener("pointercancel", onPointerUp);
-        };
-
-        const onPointerMove = (event: PointerEvent): void => {
-            if (!this.isBottomPanelResizing) return;
-
-            const delta = event.clientY - startY;
-            const maxHeight = this.computeBottomPanelMaxHeight();
-            const nextHeight = Math.max(
-                UIController.MIN_BOTTOM_PANEL_HEIGHT,
-                Math.min(maxHeight, startHeight - delta)
-            );
-
-            document.documentElement.style.setProperty("--bottom-panel-height", `${Math.round(nextHeight)}px`);
-            this.applyViewportAspectPresentation();
-        };
-
-        const onPointerUp = (): void => {
-            stopResize();
-        };
-
-        this.bottomPanelResizerEl.addEventListener("pointerdown", (event: PointerEvent) => {
-            if (event.button !== 0) return;
-            event.preventDefault();
-            startY = event.clientY;
-            startHeight = this.bottomPanelEl?.getBoundingClientRect().height ?? UIController.MIN_BOTTOM_PANEL_HEIGHT;
-            this.isBottomPanelResizing = true;
-            document.body.classList.add("bottom-panel-resizing");
-            window.addEventListener("pointermove", onPointerMove);
-            window.addEventListener("pointerup", onPointerUp);
-            window.addEventListener("pointercancel", onPointerUp);
-        });
-    }
-
-    private setupViewportAspectSync(): void {
-        if (!this.viewportContainerEl) return;
-        this.viewportAspectResizeObserver = new ResizeObserver(() => {
-            this.applyViewportAspectPresentation();
-        });
-        this.viewportAspectResizeObserver.observe(this.viewportContainerEl);
-    }
-
-    private applyViewportAspectPresentation(): void {
-        if (!this.renderCanvasEl || !this.viewportContainerEl) return;
-
-        const selectedAspect = this.outputAspectSelect?.value ?? "16:9";
-        if (selectedAspect === "viewport") {
-            this.renderCanvasEl.style.width = "100%";
-            this.renderCanvasEl.style.height = "100%";
-            this.mmdManager.resize();
-            return;
-        }
-
-        const ratio = this.resolveSelectedOutputAspectRatio();
-        const containerWidth = Math.max(1, Math.floor(this.viewportContainerEl.clientWidth));
-        const containerHeight = Math.max(1, Math.floor(this.viewportContainerEl.clientHeight));
-
-        let renderWidth = containerWidth;
-        let renderHeight = Math.max(1, Math.round(renderWidth / Math.max(0.1, ratio)));
-        if (renderHeight > containerHeight) {
-            renderHeight = containerHeight;
-            renderWidth = Math.max(1, Math.round(renderHeight * ratio));
-        }
-
-        this.renderCanvasEl.style.width = `${renderWidth}px`;
-        this.renderCanvasEl.style.height = `${renderHeight}px`;
-        this.mmdManager.resize();
-    }
-
-    private syncMainWindowPresentationAspect(): void {
-        if (!this.isUiFullscreenActive) return;
-
-        const selectedAspect = this.outputAspectSelect?.value ?? "16:9";
-        if (selectedAspect === "viewport") return;
-
-        const ratio = this.resolveSelectedOutputAspectRatio();
-        if (Math.abs(ratio - 16 / 9) > 0.001) return;
-
-        void window.electronAPI.snapMainWindowContentAspect(ratio);
-    }
-
-    private computeTimelineMaxWidth(): number {
-        const panelWidth = this.mainContentEl.clientWidth;
-        const resizerWidth = this.timelineResizerEl?.getBoundingClientRect().width ?? 6;
-        const shaderResizerWidth = this.isShaderPanelExpanded()
-            ? (this.shaderResizerEl?.getBoundingClientRect().width ?? 6)
-            : 0;
-        const shaderWidth = this.isShaderPanelExpanded()
-            ? (this.shaderPanelEl?.getBoundingClientRect().width ?? 0)
-            : 0;
-        return Math.max(
-            UIController.MIN_TIMELINE_WIDTH,
-            panelWidth - resizerWidth - shaderResizerWidth - shaderWidth - UIController.MIN_VIEWPORT_WIDTH
-        );
-    }
-
-    private clampTimelineWidthToLayout(): void {
-        if (!this.timelinePanelEl) return;
-        const currentWidth = this.timelinePanelEl.getBoundingClientRect().width;
-        const maxWidth = this.computeTimelineMaxWidth();
-        const nextWidth = Math.max(
-            UIController.MIN_TIMELINE_WIDTH,
-            Math.min(maxWidth, currentWidth)
-        );
-        document.documentElement.style.setProperty("--timeline-width", `${Math.round(nextWidth)}px`);
-    }
-
-    private computeShaderMaxWidth(): number {
-        if (!this.isShaderPanelExpanded()) {
-            return UIController.MIN_SHADER_PANEL_WIDTH;
-        }
-        const panelWidth = this.mainContentEl.clientWidth;
-        const timelineWidth = this.timelinePanelEl?.getBoundingClientRect().width ?? UIController.MIN_TIMELINE_WIDTH;
-        const timelineResizerWidth = this.timelineResizerEl?.getBoundingClientRect().width ?? 6;
-        const shaderResizerWidth = this.shaderResizerEl?.getBoundingClientRect().width ?? 6;
-        return Math.max(
-            UIController.MIN_SHADER_PANEL_WIDTH,
-            panelWidth - timelineWidth - timelineResizerWidth - shaderResizerWidth - UIController.MIN_VIEWPORT_WIDTH
-        );
-    }
-
-    private clampShaderWidthToLayout(): void {
-        if (!this.shaderPanelEl || !this.isShaderPanelExpanded()) return;
-        const currentWidth = this.shaderPanelEl.getBoundingClientRect().width;
-        const maxWidth = this.computeShaderMaxWidth();
-        const nextWidth = Math.max(
-            UIController.MIN_SHADER_PANEL_WIDTH,
-            Math.min(maxWidth, currentWidth)
-        );
-        document.documentElement.style.setProperty("--shader-panel-width", `${Math.round(nextWidth)}px`);
-    }
-
-    private computeBottomPanelMaxHeight(): number {
-        const appHeight = this.appRootEl.clientHeight;
-        const toolbarHeight = document.getElementById("toolbar")?.getBoundingClientRect().height ?? 0;
-        const resizerHeight = this.bottomPanelResizerEl?.getBoundingClientRect().height ?? 6;
-        return Math.max(
-            UIController.MIN_BOTTOM_PANEL_HEIGHT,
-            appHeight - toolbarHeight - resizerHeight - UIController.MIN_MAIN_CONTENT_HEIGHT
-        );
-    }
-
-    private clampBottomPanelHeightToLayout(): void {
-        if (!this.bottomPanelEl) return;
-        const currentHeight = this.bottomPanelEl.getBoundingClientRect().height;
-        const maxHeight = this.computeBottomPanelMaxHeight();
-        const nextHeight = Math.max(
-            UIController.MIN_BOTTOM_PANEL_HEIGHT,
-            Math.min(maxHeight, currentHeight)
-        );
-        document.documentElement.style.setProperty("--bottom-panel-height", `${Math.round(nextHeight)}px`);
-    }
-
     private refreshShaderPanel(): void {
-        if (
-            !this.shaderModelSelect ||
-            !this.shaderPresetSelect ||
-            !this.shaderApplyButton ||
-            !this.shaderResetButton ||
-            !this.shaderPanelNote ||
-            !this.shaderMaterialList
-        ) {
-            return;
-        }
-
-        this.syncShaderModelSelectorFromInfo();
-
-        if (this.mmdManager.getTimelineTarget() === "camera") {
-            this.renderShaderCameraPostEffectsPanel();
-            return;
-        }
-        this.restoreCameraDofControlsToCameraPanel();
-
-        if (!this.bundledWgslScanInFlight) {
-            void this.reloadBundledWgslShaderFiles(false);
-        }
-
-        const isAvailable = this.mmdManager.isWgslMaterialShaderAssignmentAvailable();
-        const presets = this.mmdManager.getWgslMaterialShaderPresets()
-            .filter((preset) => !UIController.HIDDEN_SHADER_PRESET_IDS.has(preset.id));
-        const models = this.mmdManager.getWgslModelShaderStates();
-        const activeExternalWgslPath = this.mmdManager.getExternalWgslToonShaderPath();
-
-        this.shaderPresetSelect.innerHTML = "";
-        for (const preset of presets) {
-            const option = document.createElement("option");
-            option.value = preset.id;
-            option.textContent = preset.label;
-            this.shaderPresetSelect.appendChild(option);
-        }
-
-        for (const bundledFile of this.bundledWgslShaderFiles) {
-            const option = document.createElement("option");
-            option.value = this.makeExternalWgslPresetValue(bundledFile.path);
-            option.textContent = `WGSL: ${bundledFile.name}`;
-            this.shaderPresetSelect.appendChild(option);
-        }
-        if (
-            activeExternalWgslPath &&
-            !Array.from(this.shaderPresetSelect.options).some((option) =>
-                option.value === this.makeExternalWgslPresetValue(activeExternalWgslPath),
-            )
-        ) {
-            const option = document.createElement("option");
-            option.value = this.makeExternalWgslPresetValue(activeExternalWgslPath);
-            option.textContent = `WGSL: ${this.getBaseNameForRenderer(activeExternalWgslPath)}`;
-            this.shaderPresetSelect.appendChild(option);
-        }
-        if (!isAvailable) {
-            this.shaderModelSelect.innerHTML = '<option value="">-</option>';
-            this.shaderModelSelect.disabled = true;
-            this.shaderPresetSelect.disabled = true;
-            this.shaderApplyButton.disabled = true;
-            this.shaderResetButton.disabled = true;
-            this.shaderPanelNote.textContent = t("shader.note.wgslUnavailable");
-            this.shaderMaterialList.innerHTML = `<div class="panel-empty-state">${t("shader.note.wgslUnavailable")}</div>`;
-            return;
-        }
-
-        if (models.length === 0) {
-            this.shaderModelSelect.innerHTML = '<option value="">-</option>';
-            this.shaderModelSelect.disabled = true;
-            this.shaderPresetSelect.disabled = true;
-            this.shaderApplyButton.disabled = true;
-            this.shaderResetButton.disabled = true;
-            this.shaderPanelNote.textContent = t("shader.note.loadModel");
-            this.shaderMaterialList.innerHTML = `<div class="panel-empty-state">${t("empty.noModel")}</div>`;
-            return;
-        }
-
-        const timelineTarget = this.mmdManager.getTimelineTarget();
-        let selectedModelIndex = Number.parseInt(this.modelSelect.value, 10);
-        if (
-            timelineTarget !== "model" ||
-            Number.isNaN(selectedModelIndex) ||
-            !models.some((model) => model.modelIndex === selectedModelIndex)
-        ) {
-            selectedModelIndex = models.find((model) => model.active)?.modelIndex ?? models[0].modelIndex;
-        }
-
-        const selectedModel = models.find((model) => model.modelIndex === selectedModelIndex) ?? models[0];
-        this.shaderModelSelect.value = String(selectedModel.modelIndex);
-        this.shaderModelSelect.disabled = false;
-
-        if (selectedModel.materials.length === 0) {
-            this.shaderPresetSelect.disabled = true;
-            this.shaderApplyButton.disabled = true;
-            this.shaderResetButton.disabled = true;
-            this.shaderPanelNote.textContent = t("shader.note.noMaterial");
-            this.shaderMaterialList.innerHTML = `<div class="panel-empty-state">${t("shader.note.noMaterial")}</div>`;
-            return;
-        }
-
-        const rememberedMaterialKey = this.shaderSelectedMaterialKeys.get(selectedModel.modelIndex);
-        const selectedMaterial = rememberedMaterialKey
-            ? selectedModel.materials.find((material) => material.key === rememberedMaterialKey) ?? null
-            : null;
-        if (rememberedMaterialKey && !selectedMaterial) {
-            this.shaderSelectedMaterialKeys.delete(selectedModel.modelIndex);
-        }
-
-        let selectedPresetId = presets[0]?.id ?? "wgsl-mmd-standard";
-        let mixedPresets = false;
-        if (selectedMaterial) {
-            selectedPresetId = selectedMaterial.presetId;
-        } else {
-            const allPresetIds = Array.from(new Set(selectedModel.materials.map((material) => material.presetId)));
-            if (allPresetIds.length === 1) {
-                selectedPresetId = allPresetIds[0];
-            } else {
-                mixedPresets = true;
-            }
-        }
-        if (!presets.some((preset) => preset.id === selectedPresetId)) {
-            selectedPresetId = presets[0]?.id ?? "wgsl-mmd-standard";
-        }
-
-        const selectedExternalWgslPath = selectedMaterial
-            ? selectedMaterial.externalWgslPath
-            : (() => {
-                const paths = new Set(
-                    selectedModel.materials
-                        .map((material) => material.externalWgslPath)
-                        .filter((value): value is string => typeof value === "string" && value.length > 0),
-                );
-                return paths.size === 1 ? Array.from(paths)[0] : null;
-            })();
-
-        if (selectedExternalWgslPath && !Array.from(this.shaderPresetSelect.options).some((option) => option.value === this.makeExternalWgslPresetValue(selectedExternalWgslPath))) {
-            const option = document.createElement("option");
-            option.value = this.makeExternalWgslPresetValue(selectedExternalWgslPath);
-            option.textContent = `WGSL: ${this.getBaseNameForRenderer(selectedExternalWgslPath)}`;
-            this.shaderPresetSelect.appendChild(option);
-        }
-
-        let selectedShaderValue: string = selectedPresetId;
-        if (selectedExternalWgslPath) {
-            selectedShaderValue = this.makeExternalWgslPresetValue(selectedExternalWgslPath);
-        }
-        if (!Array.from(this.shaderPresetSelect.options).some((option) => option.value === selectedShaderValue)) {
-            selectedShaderValue = presets[0]?.id ?? "wgsl-mmd-standard";
-        }
-        this.shaderPresetSelect.value = selectedShaderValue;
-
-        const presetLabelById = new Map(presets.map((preset) => [preset.id, preset.label]));
-        this.shaderMaterialList.innerHTML = "";
-
-        for (const material of selectedModel.materials) {
-            const item = document.createElement("div");
-            item.className = "shader-material-item";
-            if (selectedMaterial?.key === material.key) {
-                item.classList.add("active");
-            }
-            item.title = material.key;
-            item.addEventListener("click", () => {
-                const current = this.shaderSelectedMaterialKeys.get(selectedModel.modelIndex);
-                if (current === material.key) {
-                    this.shaderSelectedMaterialKeys.delete(selectedModel.modelIndex);
-                } else {
-                    this.shaderSelectedMaterialKeys.set(selectedModel.modelIndex, material.key);
-                }
-                this.refreshShaderPanel();
-            });
-
-            const nameEl = document.createElement("span");
-            nameEl.className = "shader-material-name";
-            nameEl.textContent = material.name;
-            item.appendChild(nameEl);
-
-            const presetEl = document.createElement("span");
-            presetEl.className = "shader-material-preset";
-            presetEl.textContent = material.externalWgslPath
-                ? `WGSL: ${this.getBaseNameForRenderer(material.externalWgslPath)}`
-                : (presetLabelById.get(material.presetId) ?? material.presetId);
-            item.appendChild(presetEl);
-
-            this.shaderMaterialList.appendChild(item);
-        }
-
-        this.shaderApplyButton.textContent = selectedMaterial
-            ? t("shader.apply.selected")
-            : t("shader.apply.all");
-        this.shaderResetButton.textContent = selectedMaterial
-            ? t("shader.reset.selected")
-            : t("shader.reset.all");
-
-        if (selectedExternalWgslPath) {
-            this.shaderPanelNote.textContent = t("shader.note.externalWgslActive", {
-                name: this.getBaseNameForRenderer(selectedExternalWgslPath),
-            });
-        } else if (selectedMaterial) {
-            this.shaderPanelNote.textContent = t("shader.note.selectedMaterial", {
-                name: selectedMaterial.name,
-            });
-        } else if (mixedPresets) {
-            this.shaderPanelNote.textContent = t("shader.note.mixedPresets");
-        } else {
-            const selectedPreset = presets.find((preset) => preset.id === selectedPresetId);
-            this.shaderPanelNote.textContent = selectedPreset?.description ?? t("shader.note.applyAll");
-        }
-
-        const hasSelectableOption = Array.from(this.shaderPresetSelect.options).some((option) => !option.disabled && option.value.length > 0);
-        this.shaderPresetSelect.disabled = !hasSelectableOption;
-        this.shaderApplyButton.disabled = !hasSelectableOption;
-        this.shaderResetButton.disabled = false;
+        this.shaderPanelController?.refresh();
     }
 
     private renderShaderCameraPostEffectsPanel(): void {
         if (
             !this.shaderModelSelect ||
             !this.shaderPresetSelect ||
-            !this.shaderApplyButton ||
+            !this.shaderApplySelectedButton ||
+            !this.shaderApplyAllButton ||
             !this.shaderResetButton ||
             !this.shaderPanelNote ||
             !this.shaderMaterialList
@@ -4441,16 +2309,18 @@ export class UIController {
             return;
         }
 
-        this.syncShaderModelSelectorFromInfo();
-        this.shaderModelSelect.value = UIController.CAMERA_SELECT_VALUE;
-        this.shaderModelSelect.disabled = this.modelSelect.disabled;
+        this.shaderPanelController?.syncModelSelectorFromInfo();
+        const infoModelState = this.getInfoModelSelectState();
+        this.shaderModelSelect.value = MODEL_INFO_CAMERA_SELECT_VALUE;
+        this.shaderModelSelect.disabled = infoModelState.disabled;
         this.shaderPresetSelect.innerHTML = `<option value="postfx">${t("shader.camera.postfx")}</option>`;
         this.shaderPresetSelect.value = "postfx";
         this.shaderPresetSelect.disabled = true;
-        this.shaderApplyButton.disabled = true;
+        this.shaderApplySelectedButton.disabled = true;
+        this.shaderApplyAllButton.disabled = true;
         this.shaderResetButton.disabled = true;
         this.shaderPanelNote.textContent = t("shader.camera.note");
-        const lutPresetOptionsHtml = this.buildLutPresetOptionsHtml();
+        const lutPresetOptionsHtml = this.lutPanelController?.buildPresetOptionsHtml() ?? "";
 
         this.shaderMaterialList.innerHTML = `
             <div class="shader-postfx-controls">
@@ -4485,6 +2355,16 @@ export class UIController {
                     <span data-postfx-val="chromatic-aberration" class="effect-value" data-i18n="status.off">OFF</span>
                 </div>
                 <div class="effect-row">
+                    <span class="effect-label" data-i18n="shader.postfx.edgeBlur">EdgeBlur</span>
+                    <input data-postfx="lens-edge-blur" type="range" class="effect-slider" min="0" max="100" value="0" step="1">
+                    <span data-postfx-val="lens-edge-blur" class="effect-value">0%</span>
+                </div>
+                <div class="effect-row">
+                    <span class="effect-label" data-i18n="shader.postfx.distortion">Distortion</span>
+                    <input data-postfx="distortion-influence" type="range" class="effect-slider" min="0" max="100" value="0" step="1">
+                    <span data-postfx-val="distortion-influence" class="effect-value">0%</span>
+                </div>
+                <div class="effect-row">
                     <span class="effect-label" data-i18n="shader.postfx.grain">Grain</span>
                     <input data-postfx="grain-intensity" type="range" class="effect-slider" min="0" max="100" value="0" step="1">
                     <span data-postfx-val="grain-intensity" class="effect-value" data-i18n="status.off">OFF</span>
@@ -4499,9 +2379,9 @@ export class UIController {
                     <input data-postfx="color-curves-saturation" type="range" class="effect-slider" min="-100" max="100" value="0" step="1">
                     <span data-postfx-val="color-curves-saturation" class="effect-value" data-i18n="status.off">OFF</span>
                 </div>
-                <div class="effect-row" style="display:none;">
+                <div class="effect-row">
                     <span class="effect-label" data-i18n="shader.postfx.glow">Glow</span>
-                    <input data-postfx="glow-intensity" type="range" class="effect-slider" min="0" max="400" value="50" step="1">
+                    <input data-postfx="glow-intensity" type="range" class="effect-slider" min="0" max="100" value="50" step="1">
                     <span data-postfx-val="glow-intensity" class="effect-value" data-i18n="status.off">OFF</span>
                 </div>
                 <div class="effect-row" style="display:none;">
@@ -4532,16 +2412,6 @@ export class UIController {
                     <span class="effect-label" data-i18n="shader.postfx.volumetricLight">VLight</span>
                     <input data-postfx="vls-exposure" type="range" class="effect-slider" min="0" max="200" value="30" step="1">
                     <span data-postfx-val="vls-exposure" class="effect-value" data-i18n="status.off">OFF</span>
-                </div>
-                <div class="effect-row">
-                    <span class="effect-label" data-i18n="shader.postfx.distortion">Distortion</span>
-                    <input data-postfx="distortion-influence" type="range" class="effect-slider" min="0" max="100" value="0" step="1">
-                    <span data-postfx-val="distortion-influence" class="effect-value">0%</span>
-                </div>
-                <div class="effect-row">
-                    <span class="effect-label" data-i18n="shader.postfx.edgeBlur">EdgeBlur</span>
-                    <input data-postfx="lens-edge-blur" type="range" class="effect-slider" min="0" max="100" value="0" step="1">
-                    <span data-postfx-val="lens-edge-blur" class="effect-value">0%</span>
                 </div>
                 <div class="effect-row">
                     <span class="effect-label" data-i18n="shader.postfx.edge">Edge</span>
@@ -4602,599 +2472,28 @@ export class UIController {
         applyI18nToDom(this.shaderMaterialList);
 
         const postFxControls = this.shaderMaterialList.querySelector<HTMLElement>(".shader-postfx-controls");
-        if (postFxControls) {
-            this.attachCameraDofControlsToShaderPanel(postFxControls);
-        }
-        const contrastInput = this.shaderMaterialList.querySelector<HTMLInputElement>('input[data-postfx="contrast"]');
-        const contrastVal = this.shaderMaterialList.querySelector<HTMLElement>('span[data-postfx-val="contrast"]');
-        const gammaInput = this.shaderMaterialList.querySelector<HTMLInputElement>('input[data-postfx="gamma"]');
-        const gammaVal = this.shaderMaterialList.querySelector<HTMLElement>('span[data-postfx-val="gamma"]');
-        const exposureInput = this.shaderMaterialList.querySelector<HTMLInputElement>('input[data-postfx="exposure"]');
-        const exposureVal = this.shaderMaterialList.querySelector<HTMLElement>('span[data-postfx-val="exposure"]');
-        const toneMappingTypeSelect = this.shaderMaterialList.querySelector<HTMLSelectElement>('select[data-postfx-select="tone-mapping-type"]');
-        const toneMappingVal = this.shaderMaterialList.querySelector<HTMLElement>('span[data-postfx-val="tone-mapping"]');
-        const ditheringIntensityInput = this.shaderMaterialList.querySelector<HTMLInputElement>('input[data-postfx="dithering-intensity"]');
-        const ditheringVal = this.shaderMaterialList.querySelector<HTMLElement>('span[data-postfx-val="dithering"]');
-        const vignetteWeightInput = this.shaderMaterialList.querySelector<HTMLInputElement>('input[data-postfx="vignette-weight"]');
-        const vignetteVal = this.shaderMaterialList.querySelector<HTMLElement>('span[data-postfx-val="vignette"]');
-        const bloomEnabledInput = this.shaderMaterialList.querySelector<HTMLInputElement>('input[data-postfx-check="bloom"]');
-        const bloomWeightInput = this.shaderMaterialList.querySelector<HTMLInputElement>('input[data-postfx="bloom-weight"]');
-        const bloomWeightVal = this.shaderMaterialList.querySelector<HTMLElement>('span[data-postfx-val="bloom-weight"]');
-        const bloomThresholdInput = this.shaderMaterialList.querySelector<HTMLInputElement>('input[data-postfx="bloom-threshold"]');
-        const bloomThresholdVal = this.shaderMaterialList.querySelector<HTMLElement>('span[data-postfx-val="bloom-threshold"]');
-        const bloomKernelInput = this.shaderMaterialList.querySelector<HTMLInputElement>('input[data-postfx="bloom-kernel"]');
-        const bloomKernelVal = this.shaderMaterialList.querySelector<HTMLElement>('span[data-postfx-val="bloom-kernel"]');
-        const chromaticAberrationInput = this.shaderMaterialList.querySelector<HTMLInputElement>('input[data-postfx="chromatic-aberration"]');
-        const chromaticAberrationVal = this.shaderMaterialList.querySelector<HTMLElement>('span[data-postfx-val="chromatic-aberration"]');
-        const grainIntensityInput = this.shaderMaterialList.querySelector<HTMLInputElement>('input[data-postfx="grain-intensity"]');
-        const grainIntensityVal = this.shaderMaterialList.querySelector<HTMLElement>('span[data-postfx-val="grain-intensity"]');
-        const sharpenEdgeInput = this.shaderMaterialList.querySelector<HTMLInputElement>('input[data-postfx="sharpen-edge"]');
-        const sharpenEdgeVal = this.shaderMaterialList.querySelector<HTMLElement>('span[data-postfx-val="sharpen-edge"]');
-        const colorCurvesSaturationInput = this.shaderMaterialList.querySelector<HTMLInputElement>('input[data-postfx="color-curves-saturation"]');
-        const colorCurvesSaturationVal = this.shaderMaterialList.querySelector<HTMLElement>('span[data-postfx-val="color-curves-saturation"]');
-        const glowIntensityInput = this.shaderMaterialList.querySelector<HTMLInputElement>('input[data-postfx="glow-intensity"]');
-        const glowIntensityVal = this.shaderMaterialList.querySelector<HTMLElement>('span[data-postfx-val="glow-intensity"]');
-        const lutSourceSelect = this.shaderMaterialList.querySelector<HTMLSelectElement>('select[data-postfx-select="lut-source"]');
-        const lutSourceVal = this.shaderMaterialList.querySelector<HTMLElement>('span[data-postfx-val="lut-source"]');
-        const lutFileButton = this.shaderMaterialList.querySelector<HTMLButtonElement>('button[data-postfx-btn="lut-file"]');
-        const lutFileVal = this.shaderMaterialList.querySelector<HTMLElement>('span[data-postfx-val="lut-file"]');
-        const lutEnabledInput = this.shaderMaterialList.querySelector<HTMLInputElement>('input[data-postfx-check="lut"]');
-        const lutPresetSelect = this.shaderMaterialList.querySelector<HTMLSelectElement>('select[data-postfx-select="lut-preset"]');
-        const lutVal = this.shaderMaterialList.querySelector<HTMLElement>('span[data-postfx-val="lut"]');
-        const lutIntensityInput = this.shaderMaterialList.querySelector<HTMLInputElement>('input[data-postfx="lut-intensity"]');
-        const lutIntensityVal = this.shaderMaterialList.querySelector<HTMLElement>('span[data-postfx-val="lut-intensity"]');
-        const motionBlurStrengthInput = this.shaderMaterialList.querySelector<HTMLInputElement>('input[data-postfx="motion-blur-strength"]');
-        const motionBlurStrengthVal = this.shaderMaterialList.querySelector<HTMLElement>('span[data-postfx-val="motion-blur-strength"]');
-        const ssrStrengthInput = this.shaderMaterialList.querySelector<HTMLInputElement>('input[data-postfx="ssr-strength"]');
-        const ssrStrengthVal = this.shaderMaterialList.querySelector<HTMLElement>('span[data-postfx-val="ssr-strength"]');
-        const vlsExposureInput = this.shaderMaterialList.querySelector<HTMLInputElement>('input[data-postfx="vls-exposure"]');
-        const vlsExposureVal = this.shaderMaterialList.querySelector<HTMLElement>('span[data-postfx-val="vls-exposure"]');
-        const distortionInput = this.shaderMaterialList.querySelector<HTMLInputElement>('input[data-postfx="distortion-influence"]');
-        const distortionVal = this.shaderMaterialList.querySelector<HTMLElement>('span[data-postfx-val="distortion-influence"]');
-        const lensEdgeBlurInput = this.shaderMaterialList.querySelector<HTMLInputElement>('input[data-postfx="lens-edge-blur"]');
-        const lensEdgeBlurVal = this.shaderMaterialList.querySelector<HTMLElement>('span[data-postfx-val="lens-edge-blur"]');
-        const edgeWidthInput = this.shaderMaterialList.querySelector<HTMLInputElement>('input[data-postfx="edge-width"]');
-        const edgeWidthVal = this.shaderMaterialList.querySelector<HTMLElement>('span[data-postfx-val="edge-width"]');
-
         if (
-            !contrastInput ||
-            !contrastVal ||
-            !gammaInput ||
-            !gammaVal ||
-            !exposureInput ||
-            !exposureVal ||
-            !toneMappingTypeSelect ||
-            !toneMappingVal ||
-            !ditheringIntensityInput ||
-            !ditheringVal ||
-            !vignetteWeightInput ||
-            !vignetteVal ||
-            !bloomEnabledInput ||
-            !bloomWeightInput ||
-            !bloomWeightVal ||
-            !bloomThresholdInput ||
-            !bloomThresholdVal ||
-            !bloomKernelInput ||
-            !bloomKernelVal ||
-            !chromaticAberrationInput ||
-            !chromaticAberrationVal ||
-            !grainIntensityInput ||
-            !grainIntensityVal ||
-            !sharpenEdgeInput ||
-            !sharpenEdgeVal ||
-            !colorCurvesSaturationInput ||
-            !colorCurvesSaturationVal ||
-            !glowIntensityInput ||
-            !glowIntensityVal ||
-            !lutSourceSelect ||
-            !lutSourceVal ||
-            !lutFileButton ||
-            !lutFileVal ||
-            !lutEnabledInput ||
-            !lutPresetSelect ||
-            !lutVal ||
-            !lutIntensityInput ||
-            !lutIntensityVal ||
-            !motionBlurStrengthInput ||
-            !motionBlurStrengthVal ||
-            !ssrStrengthInput ||
-            !ssrStrengthVal ||
-            !vlsExposureInput ||
-            !vlsExposureVal ||
-            !distortionInput ||
-            !distortionVal ||
-            !lensEdgeBlurInput ||
-            !lensEdgeBlurVal ||
-            !edgeWidthInput ||
-            !edgeWidthVal
+            !postFxControls ||
+            !this.colorPostFxController?.connect(postFxControls) ||
+            !this.lutPanelController?.connect(postFxControls) ||
+            !this.modelEdgeController?.connect(postFxControls) ||
+            !this.lensEffectController?.connect(postFxControls) ||
+            !this.bloomToneMapController?.connect(postFxControls) ||
+            !this.experimentalPostFxController?.connect(postFxControls)
         ) {
             return;
         }
-
-        const applyContrast = (): void => {
-            const offsetPercent = Number(contrastInput.value);
-            this.mmdManager.postEffectContrast = 1 + offsetPercent / 100;
-            const roundedOffset = Math.round((this.mmdManager.postEffectContrast - 1) * 100);
-            contrastVal.textContent = `${roundedOffset}%`;
-        };
-
-        const applyGamma = (): void => {
-            const offsetPercent = Number(gammaInput.value);
-            const gammaPower = Math.pow(2, -offsetPercent / 100);
-            this.mmdManager.postEffectGamma = gammaPower;
-            const roundedOffset = Math.round(-Math.log2(this.mmdManager.postEffectGamma) * 100);
-            gammaVal.textContent = `${roundedOffset}%`;
-        };
-
-        const applyExposure = (): void => {
-            this.mmdManager.postEffectExposure = Number(exposureInput.value);
-            exposureVal.textContent = `x${this.mmdManager.postEffectExposure.toFixed(2)}`;
-        };
-
-        const toneMapTypeToLabel = (value: number): string => {
-            switch (value) {
-                case 1:
-                    return t("shader.option.aces");
-                case 2:
-                    return t("shader.option.neutral");
-                default:
-                    return t("shader.option.standard");
-            }
-        };
-
-        const applyToneMapping = (): void => {
-            const selected = Number(toneMappingTypeSelect.value);
-            const enabled = selected >= 0;
-            this.mmdManager.postEffectToneMappingEnabled = enabled;
-            if (enabled) {
-                this.mmdManager.postEffectToneMappingType = selected;
-            }
-            toneMappingVal.textContent = this.mmdManager.postEffectToneMappingEnabled
-                ? toneMapTypeToLabel(this.mmdManager.postEffectToneMappingType)
-                : t("option.none");
-        };
-
-        const applyDithering = (): void => {
-            this.mmdManager.postEffectDitheringIntensity = Number(ditheringIntensityInput.value);
-            this.mmdManager.postEffectDitheringEnabled = this.mmdManager.postEffectDitheringIntensity > 0.000001;
-            const effectivePercent = this.mmdManager.postEffectDitheringIntensity * 100;
-            ditheringVal.textContent = this.mmdManager.postEffectDitheringEnabled
-                ? `${effectivePercent.toFixed(2)}%`
-                : t("status.off");
-        };
-
-        const applyVignette = (): void => {
-            this.mmdManager.postEffectVignetteWeight = Number(vignetteWeightInput.value);
-            this.mmdManager.postEffectVignetteEnabled = this.mmdManager.postEffectVignetteWeight > 0.000001;
-            vignetteVal.textContent = this.mmdManager.postEffectVignetteEnabled
-                ? this.mmdManager.postEffectVignetteWeight.toFixed(2)
-                : t("status.off");
-        };
-
-        const applyBloom = (): void => {
-            this.mmdManager.postEffectBloomEnabled = bloomEnabledInput.checked;
-            this.mmdManager.postEffectBloomWeight = Number(bloomWeightInput.value) / 100;
-            // Invert threshold control: move right -> wider glow range (lower threshold).
-            this.mmdManager.postEffectBloomThreshold = 2 - (Number(bloomThresholdInput.value) / 100);
-            this.mmdManager.postEffectBloomKernel = Number(bloomKernelInput.value);
-
-            bloomWeightInput.disabled = !this.mmdManager.postEffectBloomEnabled;
-            bloomThresholdInput.disabled = !this.mmdManager.postEffectBloomEnabled;
-            bloomKernelInput.disabled = !this.mmdManager.postEffectBloomEnabled;
-
-            bloomWeightVal.textContent = this.mmdManager.postEffectBloomEnabled
-                ? `${Math.round(this.mmdManager.postEffectBloomWeight * 100)}%`
-                : t("status.off");
-            bloomThresholdVal.textContent = this.mmdManager.postEffectBloomThreshold.toFixed(2);
-            bloomKernelVal.textContent = String(Math.round(this.mmdManager.postEffectBloomKernel));
-        };
-
-        const applyChromaticAberration = (): void => {
-            this.mmdManager.postEffectChromaticAberration = Number(chromaticAberrationInput.value);
-            chromaticAberrationVal.textContent = this.mmdManager.postEffectChromaticAberration > 0.000001
-                ? this.mmdManager.postEffectChromaticAberration.toFixed(0)
-                : t("status.off");
-        };
-
-        const applyGrainIntensity = (): void => {
-            this.mmdManager.postEffectGrainIntensity = Number(grainIntensityInput.value);
-            grainIntensityVal.textContent = this.mmdManager.postEffectGrainIntensity > 0.000001
-                ? this.mmdManager.postEffectGrainIntensity.toFixed(1)
-                : t("status.off");
-        };
-
-        const applySharpenEdge = (): void => {
-            this.mmdManager.postEffectSharpenEdge = Number(sharpenEdgeInput.value) / 100;
-            sharpenEdgeVal.textContent = this.mmdManager.postEffectSharpenEdge > 0.000001
-                ? this.mmdManager.postEffectSharpenEdge.toFixed(2)
-                : t("status.off");
-        };
-
-        const disableSsao = (): void => {
-            this.mmdManager.postEffectSsaoStrength = 0;
-            this.mmdManager.postEffectSsaoRadius = 2;
-            this.mmdManager.postEffectSsaoFadeEnd = 200;
-            this.mmdManager.postEffectSsaoEnabled = false;
-        };
-
-        const applyColorCurves = (): void => {
-            this.mmdManager.postEffectColorCurvesHue = 30;
-            this.mmdManager.postEffectColorCurvesDensity = 0;
-            this.mmdManager.postEffectColorCurvesSaturation = Number(colorCurvesSaturationInput.value);
-            this.mmdManager.postEffectColorCurvesExposure = 0;
-            this.mmdManager.postEffectColorCurvesEnabled = Math.abs(this.mmdManager.postEffectColorCurvesSaturation) > 0.000001;
-
-            colorCurvesSaturationVal.textContent = this.mmdManager.postEffectColorCurvesEnabled
-                ? `${Math.round(this.mmdManager.postEffectColorCurvesSaturation)}`
-                : t("status.off");
-        };
-
-        const applyGlow = (): void => {
-            this.mmdManager.postEffectGlowIntensity = Number(glowIntensityInput.value) / 100;
-            this.mmdManager.postEffectGlowKernel = 32;
-            this.mmdManager.postEffectGlowEnabled = this.mmdManager.postEffectGlowIntensity > 0.000001;
-
-            glowIntensityVal.textContent = this.mmdManager.postEffectGlowEnabled
-                ? this.mmdManager.postEffectGlowIntensity.toFixed(2)
-                : t("status.off");
-        };
-
-        const lutModeToLabel = (mode: string): string => {
-            switch (mode) {
-                case "external-absolute":
-                    return t("shader.option.externalAbsolute");
-                case "project-relative":
-                    return t("shader.option.projectLut");
-                default:
-                    return t("shader.option.builtin");
-            }
-        };
-
-        const chooseExternalLut = async (): Promise<void> => {
-            const lutPath = await window.electronAPI.openFileDialog([
-                { name: t("shader.group.lutFiles"), extensions: ["3dl", "cube"] },
-                { name: t("option.allFiles"), extensions: ["*"] },
-            ]);
-            if (!lutPath) return;
-
-            this.setStatus(t("status.loadingLut"), true);
-            if (await this.importExternalLutFile(lutPath, "dialog")) {
-                this.setStatus(t("status.lutLoaded"), false);
-            } else {
-                this.setStatus(t("status.lutLoadFailed"), false);
-            }
-        };
-
-        const applyLut = (): void => {
-            const selectedPresetValue = lutPresetSelect.value;
-            const selectedImportedEntry = this.getImportedLutEntry(selectedPresetValue);
-            const selectedMode = selectedImportedEntry
-                ? (lutSourceSelect.value === "project-relative" ? "project-relative" : "external-absolute")
-                : "builtin";
-            const hasLutSource = selectedMode === "builtin" || Boolean(selectedImportedEntry);
-
-            if (lutSourceSelect.value !== selectedMode) {
-                lutSourceSelect.value = selectedMode;
-            }
-
-            if (selectedImportedEntry) {
-                lutEnabledInput.checked = true;
-            }
-
-            if (selectedImportedEntry) {
-                this.postFxLutExternalPath = selectedImportedEntry.sourcePath;
-                this.postFxLutExternalText = selectedImportedEntry.rawText;
-                this.postFxLutExternalRuntimeText = selectedImportedEntry.runtimeText;
-                this.mmdManager.setPostEffectExternalLut(
-                    selectedImportedEntry.sourcePath,
-                    selectedImportedEntry.runtimeText,
-                    selectedImportedEntry.sourceFormat,
-                );
-            } else {
-                this.postFxLutExternalPath = null;
-                this.postFxLutExternalText = null;
-                this.postFxLutExternalRuntimeText = null;
-                this.mmdManager.setPostEffectExternalLut(null, null, null);
-                this.mmdManager.postEffectLutPreset = selectedPresetValue;
-            }
-
-            this.mmdManager.postEffectLutSourceMode = selectedMode;
-            this.mmdManager.postEffectLutIntensity = Number(lutIntensityInput.value) / 100;
-            this.mmdManager.postEffectLutEnabled = lutEnabledInput.checked
-                && hasLutSource
-                && this.mmdManager.postEffectLutIntensity > 0.000001;
-
-            lutIntensityInput.disabled = !lutEnabledInput.checked || !hasLutSource;
-            lutSourceVal.textContent = lutModeToLabel(selectedMode);
-            lutFileVal.textContent = this.postFxLutExternalPath
-                ? this.getBaseNameForRenderer(this.postFxLutExternalPath)
-                : t("option.none");
-            lutVal.textContent = this.mmdManager.postEffectLutEnabled
-                ? (selectedImportedEntry
-                    ? this.getBaseNameForRenderer(selectedImportedEntry.sourcePath)
-                    : this.mmdManager.postEffectLutPreset)
-                : t("status.off");
-            lutIntensityVal.textContent = this.mmdManager.postEffectLutEnabled
-                ? this.mmdManager.postEffectLutIntensity.toFixed(2)
-                : t("status.off");
-        };
-
-        const applyMotionBlur = (): void => {
-            this.mmdManager.postEffectMotionBlurStrength = Number(motionBlurStrengthInput.value) / 100;
-            this.mmdManager.postEffectMotionBlurSamples = 32;
-            this.mmdManager.postEffectMotionBlurEnabled = this.mmdManager.postEffectMotionBlurStrength > 0.000001;
-
-            motionBlurStrengthVal.textContent = this.mmdManager.postEffectMotionBlurEnabled
-                ? this.mmdManager.postEffectMotionBlurStrength.toFixed(2)
-                : t("status.off");
-        };
-
-        const applySsr = (): void => {
-            this.mmdManager.postEffectSsrStrength = 0;
-            this.mmdManager.postEffectSsrStep = 1;
-            this.mmdManager.postEffectSsrEnabled = false;
-            ssrStrengthVal.textContent = t("status.off");
-        };
-
-        const applyVls = (): void => {
-            this.mmdManager.postEffectVlsExposure = Number(vlsExposureInput.value) / 100;
-            this.mmdManager.postEffectVlsDecay = 0.95;
-            this.mmdManager.postEffectVlsWeight = 0.4;
-            this.mmdManager.postEffectVlsDensity = 0.9;
-            this.mmdManager.postEffectVlsEnabled = this.mmdManager.postEffectVlsExposure > 0.000001;
-
-            vlsExposureVal.textContent = this.mmdManager.postEffectVlsEnabled
-                ? this.mmdManager.postEffectVlsExposure.toFixed(2)
-                : t("status.off");
-        };
-
-        const applyDistortionInfluence = (): void => {
-            const scale = Number(distortionInput.value) / 100;
-            this.mmdManager.dofLensDistortionInfluence = scale;
-            distortionVal.textContent = `${Math.round(this.mmdManager.dofLensDistortionInfluence * 100)}%`;
-        };
-
-        const applyLensEdgeBlur = (): void => {
-            const scale = Number(lensEdgeBlurInput.value) / 100;
-            this.mmdManager.dofLensEdgeBlur = scale;
-            lensEdgeBlurVal.textContent = `${Math.round(this.mmdManager.dofLensEdgeBlur * 100)}%`;
-        };
-
-        const applyEdgeWidth = (): void => {
-            const scale = Number(edgeWidthInput.value) / 100;
-            this.mmdManager.modelEdgeWidth = scale;
-            edgeWidthVal.textContent = `${Math.round(this.mmdManager.modelEdgeWidth * 100)}%`;
-        };
-
-        contrastInput.value = String(Math.round((this.mmdManager.postEffectContrast - 1) * 100));
-        gammaInput.value = String(Math.round(-Math.log2(this.mmdManager.postEffectGamma) * 100));
-        exposureInput.value = String(Math.max(0, Math.min(8, this.mmdManager.postEffectExposure)).toFixed(2));
-        toneMappingTypeSelect.value = this.mmdManager.postEffectToneMappingEnabled
-            ? String(this.mmdManager.postEffectToneMappingType)
-            : "-1";
-        ditheringIntensityInput.value = String(
-            Math.max(0, Math.min(1, this.mmdManager.postEffectDitheringEnabled ? this.mmdManager.postEffectDitheringIntensity : 0)).toFixed(4),
-        );
-        vignetteWeightInput.value = String(
-            Math.max(0, Math.min(4, this.mmdManager.postEffectVignetteEnabled ? this.mmdManager.postEffectVignetteWeight : 0)).toFixed(2),
-        );
-        bloomEnabledInput.checked = this.mmdManager.postEffectBloomEnabled;
-        bloomWeightInput.value = String(
-            Math.max(0, Math.min(200, Math.round(this.mmdManager.postEffectBloomWeight * 100))),
-        );
-        bloomThresholdInput.value = String(
-            Math.max(0, Math.min(200, Math.round((2 - this.mmdManager.postEffectBloomThreshold) * 100))),
-        );
-        bloomKernelInput.value = String(
-            Math.max(1, Math.min(256, Math.round(this.mmdManager.postEffectBloomKernel))),
-        );
-        chromaticAberrationInput.value = String(
-            Math.max(0, Math.min(200, Math.round(this.mmdManager.postEffectChromaticAberration))),
-        );
-        grainIntensityInput.value = String(
-            Math.max(0, Math.min(100, Math.round(this.mmdManager.postEffectGrainIntensity))),
-        );
-        sharpenEdgeInput.value = String(
-            Math.max(0, Math.min(400, Math.round(this.mmdManager.postEffectSharpenEdge * 100))),
-        );
-        colorCurvesSaturationInput.value = String(
-            Math.max(
-                -100,
-                Math.min(100, Math.round(this.mmdManager.postEffectColorCurvesEnabled ? this.mmdManager.postEffectColorCurvesSaturation : 0)),
-            ),
-        );
-        glowIntensityInput.value = String(
-            Math.max(0, Math.min(400, Math.round((this.mmdManager.postEffectGlowEnabled ? this.mmdManager.postEffectGlowIntensity : 0) * 100))),
-        );
-        if (!this.postFxLutExternalPath && this.mmdManager.postEffectLutExternalPath) {
-            this.postFxLutExternalPath = this.mmdManager.postEffectLutExternalPath;
-        }
-        lutSourceSelect.value = lutSourceSelect.querySelector(`option[value="${this.mmdManager.postEffectLutSourceMode}"]`)
-            ? this.mmdManager.postEffectLutSourceMode
-            : "builtin";
-        lutEnabledInput.checked = this.mmdManager.postEffectLutEnabled;
-        lutPresetSelect.value = this.getCurrentLutPresetSelectValue();
-        lutIntensityInput.value = String(
-            Math.max(0, Math.min(100, Math.round(this.mmdManager.postEffectLutIntensity * 100))),
-        );
-        motionBlurStrengthInput.value = String(
-            Math.max(0, Math.min(200, Math.round((this.mmdManager.postEffectMotionBlurEnabled ? this.mmdManager.postEffectMotionBlurStrength : 0) * 100))),
-        );
-        ssrStrengthInput.value = String(
-            Math.max(0, Math.min(200, Math.round((this.mmdManager.postEffectSsrEnabled ? this.mmdManager.postEffectSsrStrength : 0) * 100))),
-        );
-        vlsExposureInput.value = String(
-            Math.max(0, Math.min(200, Math.round((this.mmdManager.postEffectVlsEnabled ? this.mmdManager.postEffectVlsExposure : 0) * 100))),
-        );
-        distortionInput.value = String(Math.round(this.mmdManager.dofLensDistortionInfluence * 100));
-        lensEdgeBlurInput.value = String(Math.round(this.mmdManager.dofLensEdgeBlur * 100));
-        edgeWidthInput.value = String(Math.round(this.mmdManager.modelEdgeWidth * 100));
-
-        applyContrast();
-        applyGamma();
-        applyExposure();
-        applyToneMapping();
-        applyDithering();
-        applyVignette();
-        applyBloom();
-        applyChromaticAberration();
-        applyGrainIntensity();
-        applySharpenEdge();
-        disableSsao();
-        applyColorCurves();
-        applyGlow();
-        applyLut();
-        applyMotionBlur();
-        applySsr();
-        applyVls();
-        applyDistortionInfluence();
-        applyLensEdgeBlur();
-        applyEdgeWidth();
-        if (postFxControls) {
-            this.installRangeNumberInputs(postFxControls);
-        }
-
-        contrastInput.addEventListener("input", applyContrast);
-        gammaInput.addEventListener("input", applyGamma);
-        exposureInput.addEventListener("input", applyExposure);
-        toneMappingTypeSelect.addEventListener("change", applyToneMapping);
-        ditheringIntensityInput.addEventListener("input", applyDithering);
-        vignetteWeightInput.addEventListener("input", applyVignette);
-        bloomEnabledInput.addEventListener("input", applyBloom);
-        bloomWeightInput.addEventListener("input", applyBloom);
-        bloomThresholdInput.addEventListener("input", applyBloom);
-        bloomKernelInput.addEventListener("input", applyBloom);
-        chromaticAberrationInput.addEventListener("input", applyChromaticAberration);
-        grainIntensityInput.addEventListener("input", applyGrainIntensity);
-        sharpenEdgeInput.addEventListener("input", applySharpenEdge);
-        colorCurvesSaturationInput.addEventListener("input", applyColorCurves);
-        glowIntensityInput.addEventListener("input", applyGlow);
-        lutSourceSelect.addEventListener("change", applyLut);
-        lutFileButton.addEventListener("click", () => {
-            void chooseExternalLut();
-        });
-        lutEnabledInput.addEventListener("input", applyLut);
-        lutPresetSelect.addEventListener("change", applyLut);
-        lutIntensityInput.addEventListener("input", applyLut);
-        motionBlurStrengthInput.addEventListener("input", applyMotionBlur);
-        ssrStrengthInput.addEventListener("input", applySsr);
-        vlsExposureInput.addEventListener("input", applyVls);
-        distortionInput.addEventListener("input", applyDistortionInfluence);
-        lensEdgeBlurInput.addEventListener("input", applyLensEdgeBlur);
-        edgeWidthInput.addEventListener("input", applyEdgeWidth);
-    }
-
-    private attachCameraDofControlsToShaderPanel(host: HTMLElement): void {
-        if (!this.cameraDofControlsEl) {
-            return;
-        }
-        this.cameraDofControlsEl.classList.add("shader-postfx-dof-controls");
-        if (this.cameraDofControlsEl.parentElement !== host) {
-            host.appendChild(this.cameraDofControlsEl);
-        }
-    }
-
-    private restoreCameraDofControlsToCameraPanel(): void {
-        if (!this.cameraDofControlsEl) {
-            return;
-        }
-        this.cameraDofControlsEl.classList.remove("shader-postfx-dof-controls");
-        if (this.cameraControlsEl && this.cameraDofControlsEl.parentElement !== this.cameraControlsEl) {
-            this.cameraControlsEl.appendChild(this.cameraDofControlsEl);
-        }
-    }
-
-    private async applyShaderPresetFromPanel(resetToDefault: boolean): Promise<void> {
-        if (!this.shaderPresetSelect) {
-            return;
-        }
-        if (!this.mmdManager.isWgslMaterialShaderAssignmentAvailable()) {
-            this.showToast("WGSL effect assignment is unavailable", "error");
-            return;
-        }
-        if (this.modelSelect.value === UIController.CAMERA_SELECT_VALUE) {
-            this.showToast("Select a model in the info panel first", "error");
-            return;
-        }
-
-        const models = this.mmdManager.getWgslModelShaderStates();
-        let modelIndex = Number.parseInt(this.modelSelect.value, 10);
-        if (Number.isNaN(modelIndex) || !models.some((model) => model.modelIndex === modelIndex)) {
-            modelIndex = models.find((model) => model.active)?.modelIndex ?? -1;
-        }
-        if (modelIndex < 0) {
-            this.showToast("Model is not selected", "error");
-            return;
-        }
-
-        const materialKey = this.shaderSelectedMaterialKeys.get(modelIndex) ?? null;
-        const selectedValue = resetToDefault ? "wgsl-mmd-standard" : this.shaderPresetSelect.value;
-        if (!selectedValue) {
-            this.showToast("Effect preset is not selected", "error");
-            return;
-        }
-
-        if (resetToDefault || !this.parseExternalWgslPresetPath(selectedValue)) {
-            this.postFxWgslToonPath = null;
-            this.postFxWgslToonText = null;
-            this.mmdManager.setExternalWgslToonShaderForModel(modelIndex, materialKey, null, null);
-        }
-
-        const externalWgslPath = this.parseExternalWgslPresetPath(selectedValue);
-        if (externalWgslPath) {
-            const shaderText = await window.electronAPI.readTextFile(externalWgslPath);
-            if (!shaderText) {
-                this.showToast(`WGSL shader load failed: ${this.getBaseNameForRenderer(externalWgslPath)}`, "error");
-                return;
-            }
-            const validationError = this.validateExternalWgslToonSnippet(shaderText);
-            if (validationError) {
-                this.showToast(`WGSL invalid: ${validationError}`, "error");
-                return;
-            }
-
-            const ok = this.mmdManager.setExternalWgslToonShaderForModel(modelIndex, materialKey, externalWgslPath, shaderText);
-            if (!ok) {
-                this.showToast("WGSL shader assignment failed", "error");
-                return;
-            }
-
-            this.postFxWgslToonPath = externalWgslPath;
-            this.postFxWgslToonText = shaderText;
-            this.refreshShaderPanel();
-            this.showToast(`WGSL shader selected: ${this.getBaseNameForRenderer(externalWgslPath)}`, "success");
-            return;
-        }
-
-        const ok = this.mmdManager.setWgslMaterialShaderPreset(
-            modelIndex,
-            materialKey,
-            selectedValue as WgslMaterialShaderPresetId,
-        );
-        if (!ok) {
-            this.showToast("Effect assignment failed", "error");
-            return;
-        }
-
-        this.refreshShaderPanel();
-        const targetLabel = materialKey === null ? "all materials" : "selected material";
-        this.showToast(`Effect assigned (${targetLabel})`, "success");
+        this.dofPanelController?.attachControlsToShaderPanel(postFxControls);
+        this.installRangeNumberInputs(postFxControls);
     }
 
     private applyLocalizedUiState(): void {
-        this.refreshAaToggleUi?.();
-        this.refreshShadowToggleUi?.();
-        this.refreshGiToggleUi?.();
-        this.updateGroundToggleButton(this.mmdManager.isGroundVisible());
-        this.updateSkydomeToggleButton(this.mmdManager.isSkydomeVisible());
-        this.updatePhysicsToggleButton(
-            this.mmdManager.getPhysicsEnabled(),
-            this.mmdManager.isPhysicsAvailable()
-        );
-        this.updateRigidBodyToggleButton();
-        this.updateShaderPanelToggleButton(this.isShaderPanelExpanded());
-        this.updateFullscreenUiToggleButton(this.isUiFullscreenActive);
+        this.sceneEnvironmentUiController?.refresh();
+        this.runtimeFeatureUiController?.refresh();
+        this.layoutUiController?.refreshLocalizedState();
         this.updateInfoActionButtons();
+        this.exportUiController?.refreshLocalizedState();
+        this.fogPanelController?.refresh();
         this.syncToolbarLocaleSelect();
     }
 
@@ -5218,97 +2517,6 @@ export class UIController {
         }
     }
 
-    private updateGroundToggleButton(visible: boolean): void {
-        this.groundToggleText.textContent = t("toolbar.ground.short");
-        this.btnToggleGround.setAttribute("aria-pressed", visible ? "true" : "false");
-        this.btnToggleGround.classList.toggle("toggle-on", visible);
-        this.btnToggleGround.title = visible
-            ? t("toolbar.ground.title.on")
-            : t("toolbar.ground.title.off");
-    }
-
-    private updateSkydomeToggleButton(visible: boolean): void {
-        this.skydomeToggleText.textContent = t("toolbar.sky.short");
-        this.btnToggleSkydome.setAttribute("aria-pressed", visible ? "true" : "false");
-        this.btnToggleSkydome.classList.toggle("toggle-on", visible);
-        this.btnToggleSkydome.title = visible
-            ? t("toolbar.sky.title.on")
-            : t("toolbar.sky.title.off");
-    }
-
-    private updatePhysicsToggleButton(enabled: boolean, available: boolean): void {
-        const active = available && enabled;
-        this.physicsToggleText.textContent = available
-            ? t("toolbar.physics.short")
-            : t("toolbar.physics.naShort");
-        this.btnTogglePhysics.setAttribute("aria-pressed", active ? "true" : "false");
-        this.btnTogglePhysics.classList.toggle("toggle-on", active);
-        (this.btnTogglePhysics as HTMLButtonElement).disabled = !available;
-        this.btnTogglePhysics.title = available
-            ? (active ? t("toolbar.physics.title.on") : t("toolbar.physics.title.off"))
-            : t("toolbar.physics.title.unavailable");
-        if (this.physicsGravityAccelSlider) {
-            this.physicsGravityAccelSlider.disabled = !available;
-        }
-        if (this.physicsGravityDirXSlider) this.physicsGravityDirXSlider.disabled = !available;
-        if (this.physicsGravityDirYSlider) this.physicsGravityDirYSlider.disabled = !available;
-        if (this.physicsGravityDirZSlider) this.physicsGravityDirZSlider.disabled = !available;
-        if (this.physicsSimulationRateSelect) this.physicsSimulationRateSelect.disabled = !available;
-        this.refreshPhysicsSimulationRateUi();
-    }
-
-    private updateShadowToggleButton(): void {
-        this.refreshShadowToggleUi = () => {
-            const enabled = this.mmdManager.getShadowEnabled();
-            this.shadowToggleText.textContent = t("toolbar.shadow.short");
-            this.btnToggleShadow.setAttribute("aria-pressed", enabled ? "true" : "false");
-            this.btnToggleShadow.classList.toggle("toggle-on", enabled);
-            this.btnToggleShadow.title = enabled
-                ? t("toolbar.shadow.title.on")
-                : t("toolbar.shadow.title.off");
-        };
-        this.refreshShadowToggleUi();
-    }
-
-    private updateRigidBodyToggleButton(): void {
-        const available = this.mmdManager.isRigidBodyVisualizerAvailable();
-        const active = available && this.mmdManager.isRigidBodyVisualizerEnabled();
-        this.rigidBodiesToggleText.textContent = t("button.rigidBodies");
-        this.btnToggleRigidBodies.setAttribute("aria-pressed", active ? "true" : "false");
-        this.btnToggleRigidBodies.classList.toggle("camera-view-btn--active", active);
-        (this.btnToggleRigidBodies as HTMLButtonElement).disabled = !available;
-        this.btnToggleRigidBodies.title = available
-            ? (active ? t("button.rigidBodies.title.on") : t("button.rigidBodies.title.off"))
-            : t("button.rigidBodies.title.unavailable");
-    }
-
-    private updateGiToggleButton(): void {
-        this.refreshGiToggleUi = () => {
-            const active = this.mmdManager.isGlobalIlluminationEnabled();
-            const pending = this.mmdManager.isGlobalIlluminationPending();
-            this.giToggleText.textContent = t("toolbar.gi.short");
-            this.btnToggleGi.setAttribute("aria-pressed", active || pending ? "true" : "false");
-            this.btnToggleGi.classList.toggle("toggle-on", active);
-            this.btnToggleGi.classList.toggle("toggle-loading", pending && !active);
-            this.btnToggleGi.title = pending && !active
-                ? t("toolbar.gi.title.loading")
-                : active
-                    ? t("toolbar.gi.title.on")
-                    : t("toolbar.gi.title.off");
-        };
-        this.refreshGiToggleUi();
-    }
-
-    private refreshPhysicsSimulationRateUi(): void {
-        const rate = this.mmdManager.getPhysicsSimulationRateHz();
-        if (this.physicsSimulationRateSelect) {
-            this.physicsSimulationRateSelect.value = String(rate);
-        }
-        if (this.physicsSimulationRateValueEl) {
-            this.physicsSimulationRateValueEl.textContent = `${rate}Hz`;
-        }
-    }
-
     private refreshLightingUiFromRuntime(): void {
         const setSliderValue = (
             sliderId: string,
@@ -5326,7 +2534,7 @@ export class UIController {
             this.syncRangeNumberInput(slider);
         };
 
-        const lightDirection = this.mmdManager.getLightDirection();
+        const lightDirection = this.mmdManager.getSerializedLightDirection();
         setSliderValue("light-direction-x", "light-direction-x-val", lightDirection.x, (value) => value.toFixed(2));
         setSliderValue("light-direction-y", "light-direction-y-val", lightDirection.y, (value) => value.toFixed(2));
         setSliderValue("light-direction-z", "light-direction-z-val", lightDirection.z, (value) => value.toFixed(2));
@@ -5374,157 +2582,17 @@ export class UIController {
         );
     }
 
+    private handleCameraControlEdited(): void {
+        this.bottomPanel.syncSelectedBoneSlidersFromRuntime();
+        this.markSectionKeyframeDirty("bone", this.getBoneKeyframeContextKey("Camera"));
+        this.updateSectionKeyframeButtons();
+        this.dofPanelController?.refreshAutoFocusReadout();
+    }
+
     private refreshCameraUiFromRuntime(force = false): void {
-        if (this.camDistanceSlider && this.camDistanceValueEl) {
-            const distance = this.mmdManager.getCameraDistance();
-            if (force || !this.isRangeInputEditing(this.camDistanceSlider)) {
-                const clamped = this.normalizeRangeInputValue(this.camDistanceSlider, distance);
-                this.camDistanceSlider.value = this.formatRangeInputValue(this.camDistanceSlider, clamped);
-                this.camDistanceValueEl.textContent = `${distance.toFixed(1)}m`;
-                this.syncRangeNumberInput(this.camDistanceSlider);
-            }
-        }
-
-        const fogEnabledInput = document.getElementById("effect-fog-enabled") as HTMLInputElement | null;
-        const fogEnabledValue = document.getElementById("effect-fog-enabled-val");
-        if (fogEnabledInput && fogEnabledValue) {
-            fogEnabledInput.checked = this.mmdManager.postEffectFogEnabled;
-            fogEnabledValue.textContent = this.mmdManager.postEffectFogEnabled ? t("status.on") : t("status.off");
-        }
-
-        const fogModeSelect = document.getElementById("effect-fog-mode") as HTMLSelectElement | null;
-        const fogModeValue = document.getElementById("effect-fog-mode-val");
-        if (fogModeSelect && fogModeValue) {
-            fogModeSelect.value = String(this.mmdManager.postEffectFogMode);
-            fogModeValue.textContent = this.mmdManager.postEffectFogMode === 1
-                ? t("option.fog.exp")
-                : this.mmdManager.postEffectFogMode === 2
-                    ? t("option.fog.exp2")
-                    : t("option.fog.linear");
-        }
-
-        const setFogSliderValue = (sliderId: string, valueId: string, rawValue: number, formatter?: (value: number) => string): void => {
-            const slider = document.getElementById(sliderId) as HTMLInputElement | null;
-            const valueEl = document.getElementById(valueId);
-            if (!slider || !valueEl) return;
-
-            const normalized = this.normalizeRangeInputValue(slider, rawValue);
-            slider.value = this.formatRangeInputValue(slider, normalized);
-            valueEl.textContent = formatter ? formatter(rawValue) : `${Math.round(rawValue)}`;
-            this.syncRangeNumberInput(slider);
-        };
-
-        setFogSliderValue("effect-fog-start", "effect-fog-start-val", this.mmdManager.postEffectFogStart);
-        setFogSliderValue("effect-fog-end", "effect-fog-end-val", this.mmdManager.postEffectFogEnd);
-        setFogSliderValue(
-            "effect-fog-density",
-            "effect-fog-density-val",
-            this.mmdManager.postEffectFogDensity,
-            (value) => `${Math.round(value * 10000)}`,
-        );
-        setFogSliderValue(
-            "effect-fog-opacity",
-            "effect-fog-opacity-val",
-            this.mmdManager.postEffectFogOpacity,
-            (value) => `${Math.round(value * 100)}`,
-        );
-
-        const fogColor = this.mmdManager.getPostEffectFogColor();
-        setFogSliderValue("effect-fog-color-r", "effect-fog-color-r-val", fogColor.r * 255);
-        setFogSliderValue("effect-fog-color-g", "effect-fog-color-g-val", fogColor.g * 255);
-        setFogSliderValue("effect-fog-color-b", "effect-fog-color-b-val", fogColor.b * 255);
-
-        const fogStartInput = document.getElementById("effect-fog-start") as HTMLInputElement | null;
-        const fogEndInput = document.getElementById("effect-fog-end") as HTMLInputElement | null;
-        const fogDensityInput = document.getElementById("effect-fog-density") as HTMLInputElement | null;
-        const fogOpacityInput = document.getElementById("effect-fog-opacity") as HTMLInputElement | null;
-        const isLinearFog = this.mmdManager.postEffectFogMode === 0;
-        if (fogStartInput) {
-            fogStartInput.disabled = !isLinearFog;
-        }
-        if (fogEndInput) {
-            fogEndInput.disabled = !isLinearFog;
-        }
-        if (fogDensityInput) {
-            fogDensityInput.disabled = isLinearFog;
-        }
-        if (fogOpacityInput) {
-            fogOpacityInput.disabled = false;
-        }
-    }
-
-    private updateCameraViewButtons(active: CameraViewPreset): void {
-        const left = active === "left";
-        const front = active === "front";
-        const right = active === "right";
-        const top = active === "top";
-        const back = active === "back";
-        const bottom = active === "bottom";
-        this.camViewLeftBtn?.classList.toggle("camera-view-btn--active", left);
-        this.camViewFrontBtn?.classList.toggle("camera-view-btn--active", front);
-        this.camViewRightBtn?.classList.toggle("camera-view-btn--active", right);
-        this.camViewTopBtn?.classList.toggle("camera-view-btn--active", top);
-        this.camViewBackBtn?.classList.toggle("camera-view-btn--active", back);
-        this.camViewBottomBtn?.classList.toggle("camera-view-btn--active", bottom);
-        this.camViewLeftBtn?.setAttribute("aria-pressed", left ? "true" : "false");
-        this.camViewFrontBtn?.setAttribute("aria-pressed", front ? "true" : "false");
-        this.camViewRightBtn?.setAttribute("aria-pressed", right ? "true" : "false");
-        this.camViewTopBtn?.setAttribute("aria-pressed", top ? "true" : "false");
-        this.camViewBackBtn?.setAttribute("aria-pressed", back ? "true" : "false");
-        this.camViewBottomBtn?.setAttribute("aria-pressed", bottom ? "true" : "false");
-    }
-
-    private refreshDofAutoFocusReadout(): void {
-        if (!this.mmdManager.dofAutoFocusEnabled) return;
-
-        if (this.dofFocusSlider && this.dofFocusValueEl && !this.isRangeInputEditing(this.dofFocusSlider)) {
-            const focusMm = this.mmdManager.dofFocusDistanceMm;
-            const sliderMin = Number(this.dofFocusSlider.min);
-            const sliderMax = Number(this.dofFocusSlider.max);
-            const clamped = Math.max(sliderMin, Math.min(sliderMax, focusMm));
-            this.dofFocusSlider.value = String(Math.round(clamped));
-            this.dofFocusValueEl.textContent = `${(focusMm / 1000).toFixed(1)}m (auto)`;
-            this.syncRangeNumberInput(this.dofFocusSlider);
-        }
-
-        if (this.dofFStopValueEl) {
-            const baseFStop = this.mmdManager.dofFStop;
-            const effectiveFStop = this.mmdManager.dofEffectiveFStop;
-            const hasCompensation = effectiveFStop > baseFStop + 0.01;
-            this.dofFStopValueEl.textContent = hasCompensation
-                ? `${baseFStop.toFixed(2)} -> ${effectiveFStop.toFixed(2)}`
-                : effectiveFStop.toFixed(2);
-        }
-
-        if (
-            this.mmdManager.dofFocalLengthLinkedToCameraFov &&
-            this.dofFocalLengthSlider &&
-            this.dofFocalLengthValueEl &&
-            !this.isRangeInputEditing(this.dofFocalLengthSlider)
-        ) {
-            const focalLength = this.mmdManager.dofFocalLength;
-            const sliderMin = Number(this.dofFocalLengthSlider.min);
-            const sliderMax = Number(this.dofFocalLengthSlider.max);
-            const clamped = Math.max(sliderMin, Math.min(sliderMax, focalLength));
-            this.dofFocalLengthSlider.value = String(Math.round(clamped));
-            this.dofFocalLengthValueEl.textContent = this.mmdManager.dofFocalLengthDistanceInverted
-                ? `${Math.round(focalLength)} (auto, inv)`
-                : `${Math.round(focalLength)} (auto)`;
-            this.syncRangeNumberInput(this.dofFocalLengthSlider);
-        }
-    }
-
-    private refreshLensDistortionAutoReadout(): void {
-        if (!this.mmdManager.dofLensDistortionLinkedToCameraFov) return;
-        if (!this.lensDistortionSlider || !this.lensDistortionValueEl) return;
-        if (this.isRangeInputEditing(this.lensDistortionSlider)) return;
-        const distortionPercent = this.mmdManager.dofLensDistortion * 100;
-        const sliderMin = Number(this.lensDistortionSlider.min);
-        const sliderMax = Number(this.lensDistortionSlider.max);
-        const clamped = Math.max(sliderMin, Math.min(sliderMax, distortionPercent));
-        this.lensDistortionSlider.value = String(Math.round(clamped));
-        this.lensDistortionValueEl.textContent = `${Math.round(distortionPercent)}% (auto)`;
-        this.syncRangeNumberInput(this.lensDistortionSlider);
+        this.cameraPanelController?.refresh(force);
+        this.lensEffectController?.refresh();
+        this.fogPanelController?.refresh();
     }
 
     private getSelectedTimelineTrack(): KeyframeTrack | null {
@@ -5614,18 +2682,129 @@ export class UIController {
         this.mmdManager.setBoneVisualizerSelectedBone(null);
     }
 
+    private refreshSelectedTrackRotationOverlay(): void {
+        const track = this.getSelectedTimelineTrack();
+        if (!this.isRotationOverlayTrack(track)) {
+            this.timeline.setSelectedTrackRotationOverlay(null);
+            return;
+        }
+
+        this.timeline.setSelectedTrackRotationOverlay(this.buildSelectedTrackRotationOverlay(track));
+    }
+
+    private isRotationOverlayTrack(track: KeyframeTrack | null): track is KeyframeTrack {
+        if (!track) return false;
+        return track.category === "root"
+            || track.category === "semi-standard"
+            || track.category === "bone"
+            || track.category === "camera";
+    }
+
+    private buildSelectedTrackRotationOverlay(track: KeyframeTrack): TimelineRotationOverlay | null {
+        if (track.frames.length === 0) return null;
+
+        const managerInternal = this.mmdManager as unknown as Partial<MmdManagerInternalView>;
+
+        if (track.category === "camera") {
+            const cameraTrack = managerInternal.cameraSourceAnimation?.cameraTrack;
+            if (!cameraTrack) return null;
+
+            const firstFrame = Math.max(0, Math.floor(track.frames[0] ?? 0));
+            const lastFrame = Math.max(firstFrame, Math.floor(track.frames[track.frames.length - 1] ?? firstFrame));
+            const sampleCount = lastFrame - firstFrame + 1;
+            if (sampleCount <= 0) return null;
+
+            const frames = new Uint32Array(sampleCount);
+            const x = new Float32Array(sampleCount);
+            const y = new Float32Array(sampleCount);
+            const z = new Float32Array(sampleCount);
+            let maxAbsValue = 0;
+
+            for (let i = 0; i < sampleCount; i += 1) {
+                const frame = firstFrame + i;
+                const pose = this.sampleCameraPoseFromTrack(cameraTrack, frame);
+                const rotation = pose?.rotation ?? { x: 0, y: 0, z: 0 };
+
+                frames[i] = frame;
+                x[i] = rotation.x;
+                y[i] = rotation.y;
+                z[i] = rotation.z;
+                maxAbsValue = Math.max(maxAbsValue, Math.abs(rotation.x), Math.abs(rotation.y), Math.abs(rotation.z));
+            }
+
+            return {
+                trackName: track.name,
+                trackCategory: track.category,
+                frames,
+                x,
+                y,
+                z,
+                maxAbsValue,
+            };
+        }
+
+        const currentModel = managerInternal.currentModel;
+        if (!currentModel) return null;
+
+        const modelAnimation = managerInternal.modelSourceAnimationsByModel?.get(currentModel as object);
+        if (!modelAnimation) return null;
+
+        const movableTrack = modelAnimation.movableBoneTracks.find((runtimeTrack) => runtimeTrack.name === track.name) ?? null;
+        const boneTrack = modelAnimation.boneTracks.find((runtimeTrack) => runtimeTrack.name === track.name) ?? null;
+        if (!movableTrack && !boneTrack) return null;
+
+        const firstFrame = Math.max(0, Math.floor(track.frames[0] ?? 0));
+        const lastFrame = Math.max(firstFrame, Math.floor(track.frames[track.frames.length - 1] ?? firstFrame));
+        const sampleCount = lastFrame - firstFrame + 1;
+        if (sampleCount <= 0) return null;
+
+        const frames = new Uint32Array(sampleCount);
+        const x = new Float32Array(sampleCount);
+        const y = new Float32Array(sampleCount);
+        const z = new Float32Array(sampleCount);
+        let maxAbsValue = 0;
+
+        for (let i = 0; i < sampleCount; i += 1) {
+            const frame = firstFrame + i;
+            const pose = movableTrack
+                ? this.sampleMovableBonePoseFromTrack(movableTrack, frame)
+                : this.sampleBonePoseFromTrack(boneTrack, frame);
+            const rotation = pose?.rotation ?? { x: 0, y: 0, z: 0 };
+
+            frames[i] = frame;
+            x[i] = rotation.x;
+            y[i] = rotation.y;
+            z[i] = rotation.z;
+            maxAbsValue = Math.max(maxAbsValue, Math.abs(rotation.x), Math.abs(rotation.y), Math.abs(rotation.z));
+        }
+
+        return {
+            trackName: track.name,
+            trackCategory: track.category,
+            frames,
+            x,
+            y,
+            z,
+            maxAbsValue,
+        };
+    }
+
     private updateTimelineEditState(): void {
         const track = this.getSelectedTimelineTrack();
         const selectedFrame = this.timeline.getSelectedFrame();
         const currentFrame = this.mmdManager.currentFrame;
 
         if (!track) {
-            this.timelineSelectionLabel.textContent = "No track selected";
+            if (this.timelineSelectionLabel) {
+                this.timelineSelectionLabel.textContent = "No track selected";
+            }
             this.interpolationTrackNameLabel.textContent = "-";
             this.interpolationFrameLabel.textContent = "-";
             this.resetInterpolationTypeSelect();
             this.interpolationStatusLabel.textContent = "No track selected";
+            this.currentInterpolationPreview = null;
             this.renderInterpolationCurves(null);
+            this.updateInterpolationActionButtons();
             this.btnKeyframeAdd.disabled = true;
             this.btnKeyframeDelete.disabled = true;
             this.btnKeyframeNudgeLeft.disabled = false;
@@ -5636,7 +2815,9 @@ export class UIController {
 
         const frameLabel = selectedFrame !== null ? ` @${selectedFrame}` : "";
         const trackTypeLabel = this.getTrackTypeLabel(track);
-        this.timelineSelectionLabel.textContent = `[${trackTypeLabel}] ${track.name}${frameLabel}`;
+        if (this.timelineSelectionLabel) {
+            this.timelineSelectionLabel.textContent = `[${trackTypeLabel}] ${track.name}${frameLabel}`;
+        }
         const interpolationFrame = selectedFrame ?? currentFrame;
         this.interpolationTrackNameLabel.textContent = `${trackTypeLabel}: ${track.name}`;
         this.interpolationFrameLabel.textContent = String(interpolationFrame);
@@ -5932,7 +3113,9 @@ export class UIController {
         return `${this.getSectionKeyframeContextPrefix("morph")}:frame:${frameIndex}:key:${this.mmdManager.currentFrame}`;
     }
 
-    private getAccessoryKeyframeContextKey(accessoryIndex: number | null = this.getSelectedAccessoryIndex()): string | null {
+    private getAccessoryKeyframeContextKey(
+        accessoryIndex: number | null = this.accessoryPanelController?.getSelectedAccessoryIndex() ?? null,
+    ): string | null {
         if (accessoryIndex === null || accessoryIndex < 0) return null;
         return `${this.getSectionKeyframeContextPrefix("accessory")}:${accessoryIndex}:frame:${this.mmdManager.currentFrame}`;
     }
@@ -6339,7 +3522,7 @@ export class UIController {
     }
 
     private getAccessoryKeyframeButtonState(): SectionKeyframeButtonState {
-        const accessoryIndex = this.getSelectedAccessoryIndex();
+        const accessoryIndex = this.accessoryPanelController?.getSelectedAccessoryIndex() ?? null;
         const contextKey = this.getAccessoryKeyframeContextKey(accessoryIndex);
         if (accessoryIndex === null || !contextKey) return "none";
 
@@ -6350,6 +3533,7 @@ export class UIController {
 
     private updateInterpolationPreview(track: KeyframeTrack, frame: number): void {
         const preview = this.buildInterpolationPreviewFromRuntime(track, frame);
+        this.currentInterpolationPreview = preview;
         this.syncInterpolationTypeSelect(preview);
 
         if (preview.source === "morph") {
@@ -6363,6 +3547,7 @@ export class UIController {
         }
 
         this.renderInterpolationCurves(preview);
+        this.updateInterpolationActionButtons();
     }
 
     private buildInterpolationPreviewFromRuntime(track: KeyframeTrack, frame: number): TimelineInterpolationPreview {
@@ -6558,7 +3743,7 @@ export class UIController {
         event.preventDefault();
         event.stopPropagation();
 
-        this.interpolationDragState = { channelId, pointIndex, changed: false };
+        this.interpolationDragState = { channelId, pointIndex, changed: false, dirtyMarked: false };
         const onMove = (moveEvent: PointerEvent) => this.handleInterpolationCurveDragMove(moveEvent, svg);
         const onUp = () => {
             window.removeEventListener("pointermove", onMove);
@@ -6567,6 +3752,7 @@ export class UIController {
             this.interpolationDragState = null;
             if (changed) {
                 this.refreshRuntimeAnimationFromInterpolationEdit();
+                this.updateTimelineEditState();
             }
         };
 
@@ -6607,9 +3793,64 @@ export class UIController {
         }
 
         dragState.changed = true;
-        this.markSectionKeyframeDirty("interpolation", this.getInterpolationKeyframeContextKey());
-        this.updateSectionKeyframeButtons();
-        this.updateTimelineEditState();
+        if (!dragState.dirtyMarked) {
+            dragState.dirtyMarked = true;
+            this.markSectionKeyframeDirty("interpolation", this.getInterpolationKeyframeContextKey());
+            this.updateSectionKeyframeButtons();
+        }
+        this.updateInterpolationCurveDragVisuals(svg, dragState.channelId);
+    }
+
+    private updateInterpolationCurveDragVisuals(svg: SVGSVGElement, channelId: string): void {
+        const binding = this.interpolationChannelBindings.get(channelId);
+        if (!binding) return;
+
+        const x1 = binding.values[binding.offset + 0];
+        const x2 = binding.values[binding.offset + 1];
+        const y1 = binding.values[binding.offset + 2];
+        const y2 = binding.values[binding.offset + 3];
+
+        const { left, right, top, bottom, innerWidth, innerHeight } =
+            this.getInterpolationCurveGeometry();
+
+        const px1 = left + (x1 / 127) * innerWidth;
+        const px2 = left + (x2 / 127) * innerWidth;
+        const py1 = bottom - (y1 / 127) * innerHeight;
+        const py2 = bottom - (y2 / 127) * innerHeight;
+
+        const svgElements = Array.from(svg.querySelectorAll<SVGElement>("[data-channel-id]"));
+        for (const element of svgElements) {
+            if (element.dataset.channelId !== channelId) continue;
+            switch (element.dataset.role) {
+                case "handle-line-start":
+                    element.setAttribute("x2", String(px1));
+                    element.setAttribute("y2", String(py1));
+                    break;
+                case "handle-line-end":
+                    element.setAttribute("x1", String(px2));
+                    element.setAttribute("y1", String(py2));
+                    break;
+                case "curve-path":
+                    element.setAttribute("d", `M ${left} ${bottom} C ${px1} ${py1}, ${px2} ${py2}, ${right} ${top}`);
+                    break;
+                case "point":
+                case "hit-area":
+                    if (element.dataset.pointIndex === "1") {
+                        element.setAttribute("cx", String(px1));
+                        element.setAttribute("cy", String(py1));
+                    } else if (element.dataset.pointIndex === "2") {
+                        element.setAttribute("cx", String(px2));
+                        element.setAttribute("cy", String(py2));
+                    }
+                    break;
+            }
+        }
+
+        const valueLabels = Array.from(this.interpolationCurveList.querySelectorAll<HTMLElement>(".interp-curve-value"));
+        const valueLabel = valueLabels.find((element) => element.dataset.channelId === channelId);
+        if (valueLabel) {
+            valueLabel.textContent = `${x1},${x2},${y1},${y2}`;
+        }
     }
 
     private refreshRuntimeAnimationFromInterpolationEdit(): void {
@@ -6702,6 +3943,140 @@ export class UIController {
         this.interpolationCurveList.appendChild(this.createInterpolationCurveCard(renderChannels));
     }
 
+    private updateInterpolationActionButtons(): void {
+        const targetChannels = this.getActiveEditableInterpolationChannels();
+        const hasTargetChannels = targetChannels.length > 0 && !this.mmdManager.isPlaying;
+        if (this.btnInterpolationCopy) {
+            this.btnInterpolationCopy.disabled = !hasTargetChannels;
+        }
+        if (this.btnInterpolationLinear) {
+            this.btnInterpolationLinear.disabled = !hasTargetChannels;
+        }
+        if (this.btnInterpolationPaste) {
+            this.btnInterpolationPaste.disabled = !hasTargetChannels || !this.interpolationCurveClipboard;
+        }
+    }
+
+    private getActiveEditableInterpolationChannels(): InterpolationChannelPreview[] {
+        const preview = this.currentInterpolationPreview;
+        if (!preview) return [];
+        return this.getInterpolationChannelsForRender(preview)
+            .filter((channel) => channel.available && this.isInterpolationChannelEditable(channel.id));
+    }
+
+    private readCurrentInterpolationCurve(channel: InterpolationChannelPreview): InterpolationCurve {
+        const binding = this.interpolationChannelBindings.get(channel.id);
+        if (!binding) {
+            return { ...channel.curve };
+        }
+        return {
+            x1: binding.values[binding.offset + 0],
+            x2: binding.values[binding.offset + 1],
+            y1: binding.values[binding.offset + 2],
+            y2: binding.values[binding.offset + 3],
+        };
+    }
+
+    private writeInterpolationCurve(channelId: string, curve: InterpolationCurve): boolean {
+        const binding = this.interpolationChannelBindings.get(channelId);
+        if (!binding) return false;
+        binding.values[binding.offset + 0] = this.clampInterpolationValue(curve.x1, 0);
+        binding.values[binding.offset + 1] = this.clampInterpolationValue(curve.x2, 0);
+        binding.values[binding.offset + 2] = this.clampInterpolationValue(curve.y1, 0);
+        binding.values[binding.offset + 3] = this.clampInterpolationValue(curve.y2, 0);
+        return true;
+    }
+
+    private copyInterpolationCurves(): void {
+        const targetChannels = this.getActiveEditableInterpolationChannels();
+        if (targetChannels.length === 0) {
+            this.showToast("No interpolation curves available to copy", "info");
+            return;
+        }
+
+        this.interpolationCurveClipboard = {
+            curves: targetChannels.map((channel) => this.readCurrentInterpolationCurve(channel)),
+            sourceChannelCount: targetChannels.length,
+        };
+        this.updateInterpolationActionButtons();
+
+        const label = targetChannels.length === 1
+            ? `${targetChannels[0]?.label ?? "curve"}`
+            : `${targetChannels.length} curves`;
+        this.showToast(`Copied ${label}`, "success");
+    }
+
+    private pasteInterpolationCurves(): void {
+        const clipboard = this.interpolationCurveClipboard;
+        if (!clipboard || clipboard.curves.length === 0) {
+            this.showToast("No copied interpolation curves", "info");
+            return;
+        }
+
+        const targetChannels = this.getActiveEditableInterpolationChannels();
+        if (targetChannels.length === 0) {
+            this.showToast("No interpolation curves available to paste", "info");
+            return;
+        }
+
+        let changed = false;
+        if (clipboard.curves.length === 1) {
+            const sourceCurve = clipboard.curves[0];
+            for (const channel of targetChannels) {
+                changed = this.writeInterpolationCurve(channel.id, sourceCurve) || changed;
+            }
+        } else {
+            const count = Math.min(targetChannels.length, clipboard.curves.length);
+            for (let i = 0; i < count; i += 1) {
+                const channel = targetChannels[i];
+                const curve = clipboard.curves[i];
+                changed = this.writeInterpolationCurve(channel.id, curve) || changed;
+            }
+        }
+
+        if (!changed) {
+            this.showToast("Interpolation paste target is not editable", "info");
+            return;
+        }
+
+        this.finalizeInterpolationCurveEdit(
+            clipboard.curves.length === 1 && targetChannels.length > 1
+                ? `Pasted to ${targetChannels.length} curves`
+                : "Interpolation curves pasted",
+        );
+    }
+
+    private resetInterpolationCurvesToLinear(): void {
+        const targetChannels = this.getActiveEditableInterpolationChannels();
+        if (targetChannels.length === 0) {
+            this.showToast("No interpolation curves available to reset", "info");
+            return;
+        }
+
+        const linear = this.createLinearCurve();
+        let changed = false;
+        for (const channel of targetChannels) {
+            changed = this.writeInterpolationCurve(channel.id, linear) || changed;
+        }
+        if (!changed) {
+            this.showToast("Interpolation reset target is not editable", "info");
+            return;
+        }
+
+        this.finalizeInterpolationCurveEdit(
+            targetChannels.length === 1 ? "Interpolation reset to linear" : `${targetChannels.length} curves reset to linear`,
+        );
+    }
+
+    private finalizeInterpolationCurveEdit(message: string): void {
+        this.markSectionKeyframeDirty("interpolation", this.getInterpolationKeyframeContextKey());
+        this.refreshRuntimeAnimationFromInterpolationEdit();
+        this.refreshSelectedTrackRotationOverlay();
+        this.updateTimelineEditState();
+        this.updateSectionKeyframeButtons();
+        this.showToast(message, "success");
+    }
+
     private resetInterpolationTypeSelect(): void {
         this.interpolationTypeSelect.textContent = "";
         const option = document.createElement("option");
@@ -6778,6 +4153,7 @@ export class UIController {
 
             const value = document.createElement("span");
             value.className = "interp-curve-value";
+            value.dataset.channelId = channel.id;
             value.textContent = `${channel.curve.x1},${channel.curve.x2},${channel.curve.y1},${channel.curve.y2}`;
 
             item.appendChild(name);
@@ -6838,9 +4214,36 @@ export class UIController {
             const channelPy1 = bottom - (curve.y1 / 127) * innerHeight;
             const channelPy2 = bottom - (curve.y2 / 127) * innerHeight;
             const color = this.getCurveChannelColor(channel);
+            const editable = channel.available && this.isInterpolationChannelEditable(channel.id);
+
+            const handleLine1 = document.createElementNS(svgNs, "line");
+            handleLine1.classList.add("interp-curve-handle-line");
+            handleLine1.dataset.channelId = channel.id;
+            handleLine1.dataset.role = "handle-line-start";
+            handleLine1.setAttribute("x1", String(left));
+            handleLine1.setAttribute("y1", String(bottom));
+            handleLine1.setAttribute("x2", String(channelPx1));
+            handleLine1.setAttribute("y2", String(channelPy1));
+            handleLine1.style.stroke = color;
+
+            const handleLine2 = document.createElementNS(svgNs, "line");
+            handleLine2.classList.add("interp-curve-handle-line");
+            handleLine2.dataset.channelId = channel.id;
+            handleLine2.dataset.role = "handle-line-end";
+            handleLine2.setAttribute("x1", String(channelPx2));
+            handleLine2.setAttribute("y1", String(channelPy2));
+            handleLine2.setAttribute("x2", String(right));
+            handleLine2.setAttribute("y2", String(top));
+            handleLine2.style.stroke = color;
+            if (!channel.available) {
+                handleLine1.classList.add("interp-curve-handle-line--muted");
+                handleLine2.classList.add("interp-curve-handle-line--muted");
+            }
 
             const path = document.createElementNS(svgNs, "path");
             path.classList.add("interp-curve-path");
+            path.dataset.channelId = channel.id;
+            path.dataset.role = "curve-path";
             path.setAttribute("d", `M ${left} ${bottom} C ${channelPx1} ${channelPy1}, ${channelPx2} ${channelPy2}, ${right} ${top}`);
             path.setAttribute("stroke", color);
             if (!channel.available) {
@@ -6850,40 +4253,88 @@ export class UIController {
 
             const p1 = document.createElementNS(svgNs, "circle");
             p1.classList.add("interp-curve-point");
+            p1.dataset.channelId = channel.id;
+            p1.dataset.role = "point";
+            p1.dataset.pointIndex = "1";
             p1.setAttribute("cx", String(channelPx1));
             p1.setAttribute("cy", String(channelPy1));
-            p1.setAttribute("r", "2");
-            p1.setAttribute("fill", color);
+            p1.setAttribute("r", editable ? "3.3" : "2.7");
             if (!channel.available) {
                 p1.setAttribute("opacity", "0.5");
-            } else if (this.isInterpolationChannelEditable(channel.id)) {
+            } else if (editable) {
                 p1.classList.add("interp-curve-point--editable");
-                p1.style.cursor = "grab";
-                p1.addEventListener("pointerdown", (event) =>
-                    this.startInterpolationCurveDrag(event, channel.id, 1)
-                );
+                p1.style.fill = color;
             }
 
             const p2 = document.createElementNS(svgNs, "circle");
             p2.classList.add("interp-curve-point");
+            p2.dataset.channelId = channel.id;
+            p2.dataset.role = "point";
+            p2.dataset.pointIndex = "2";
             p2.setAttribute("cx", String(channelPx2));
             p2.setAttribute("cy", String(channelPy2));
-            p2.setAttribute("r", "2");
-            p2.setAttribute("fill", color);
+            p2.setAttribute("r", editable ? "3.3" : "2.7");
             if (!channel.available) {
                 p2.setAttribute("opacity", "0.5");
-            } else if (this.isInterpolationChannelEditable(channel.id)) {
+            } else if (editable) {
                 p2.classList.add("interp-curve-point--editable");
+                p2.style.fill = color;
+            }
+
+            const p1Hit = document.createElementNS(svgNs, "circle");
+            p1Hit.classList.add("interp-curve-hit-area");
+            p1Hit.dataset.channelId = channel.id;
+            p1Hit.dataset.role = "hit-area";
+            p1Hit.dataset.pointIndex = "1";
+            p1Hit.setAttribute("cx", String(channelPx1));
+            p1Hit.setAttribute("cy", String(channelPy1));
+            p1Hit.setAttribute("r", editable ? "8" : "6");
+
+            const p2Hit = document.createElementNS(svgNs, "circle");
+            p2Hit.classList.add("interp-curve-hit-area");
+            p2Hit.dataset.channelId = channel.id;
+            p2Hit.dataset.role = "hit-area";
+            p2Hit.dataset.pointIndex = "2";
+            p2Hit.setAttribute("cx", String(channelPx2));
+            p2Hit.setAttribute("cy", String(channelPy2));
+            p2Hit.setAttribute("r", editable ? "8" : "6");
+
+            if (editable) {
+                p1.style.cursor = "grab";
                 p2.style.cursor = "grab";
-                p2.addEventListener("pointerdown", (event) =>
+                p1Hit.style.cursor = "grab";
+                p2Hit.style.cursor = "grab";
+                p1Hit.addEventListener("pointerdown", (event) =>
+                    this.startInterpolationCurveDrag(event, channel.id, 1)
+                );
+                p2Hit.addEventListener("pointerdown", (event) =>
                     this.startInterpolationCurveDrag(event, channel.id, 2)
                 );
             }
 
+            svg.appendChild(handleLine1);
+            svg.appendChild(handleLine2);
             svg.appendChild(path);
             svg.appendChild(p1);
             svg.appendChild(p2);
+            svg.appendChild(p1Hit);
+            svg.appendChild(p2Hit);
         }
+
+        const startAnchor = document.createElementNS(svgNs, "circle");
+        startAnchor.classList.add("interp-curve-anchor");
+        startAnchor.setAttribute("cx", String(left));
+        startAnchor.setAttribute("cy", String(bottom));
+        startAnchor.setAttribute("r", "1.8");
+
+        const endAnchor = document.createElementNS(svgNs, "circle");
+        endAnchor.classList.add("interp-curve-anchor");
+        endAnchor.setAttribute("cx", String(right));
+        endAnchor.setAttribute("cy", String(top));
+        endAnchor.setAttribute("r", "1.8");
+
+        svg.appendChild(startAnchor);
+        svg.appendChild(endAnchor);
         return svg;
     }
 
@@ -6962,6 +4413,7 @@ export class UIController {
                 if (this.isBoneTrackForEditor(track) && this.bottomPanel.getSelectedBone() === track.name) {
                     this.clearSectionKeyframeDirty("bone", this.getBoneKeyframeContextKey(track.name));
                 }
+                this.refreshSelectedTrackRotationOverlay();
                 this.updateTimelineEditState();
                 this.updateSectionKeyframeButtons();
                 this.showToast(`Frame ${frame} keyframe updated`, "success");
@@ -6981,6 +4433,7 @@ export class UIController {
         if (this.isBoneTrackForEditor(track) && this.bottomPanel.getSelectedBone() === track.name) {
             this.clearSectionKeyframeDirty("bone", this.getBoneKeyframeContextKey(track.name));
         }
+        this.refreshSelectedTrackRotationOverlay();
         this.updateTimelineEditState();
         this.updateSectionKeyframeButtons();
         this.showToast(`Frame ${frame}: keyframe added`, "success");
@@ -7057,7 +4510,7 @@ export class UIController {
     }
 
     private registerAccessoryTransformKeyframe(): void {
-        const accessoryIndex = this.getSelectedAccessoryIndex();
+        const accessoryIndex = this.accessoryPanelController?.getSelectedAccessoryIndex() ?? null;
         if (accessoryIndex === null) {
             this.showToast("Please select an accessory", "error");
             return;
@@ -7545,7 +4998,27 @@ export class UIController {
         this.showToast(`Key moved: ${fromFrame} -> ${toFrame}`, "success");
     }
 
+    private getPlaybackFrameRange(): { startFrame: number; endFrame: number } {
+        return this.exportUiController?.getPlaybackFrameRange() ?? {
+            startFrame: 0,
+            endFrame: Math.max(0, Math.floor(this.mmdManager.totalFrames)),
+        };
+    }
+
+    private isPlaybackFrameStartEnabled(): boolean {
+        return this.exportUiController?.isPlaybackFrameStartEnabled() ?? false;
+    }
+
+    private isPlaybackFrameStopEnabled(): boolean {
+        return this.exportUiController?.isPlaybackFrameStopEnabled() ?? false;
+    }
+
     private play(updateStatus = true): void {
+        const { startFrame } = this.getPlaybackFrameRange();
+        if (this.isPlaybackFrameStartEnabled()) {
+            this.mmdManager.pause();
+            this.mmdManager.seekTo(startFrame);
+        }
         this.mmdManager.play();
         this.btnPlay.style.display = "none";
         this.btnPause.style.display = "flex";
@@ -7560,15 +5033,18 @@ export class UIController {
     }
 
     private stop(): void {
-        this.mmdManager.stop();
+        this.mmdManager.pause();
+        if (!this.isPlaybackFrameStopEnabled()) {
+            this.mmdManager.seekToBoundary(this.getPlaybackFrameRange().startFrame);
+        }
         this.btnPlay.style.display = "flex";
         this.btnPause.style.display = "none";
         this.setStatus("Stopped", false);
     }
 
-    private stopAtPlaybackEnd(): void {
+    private stopAtPlaybackEnd(endFrame: number): void {
         this.mmdManager.pause();
-        this.mmdManager.seekTo(this.mmdManager.totalFrames);
+        this.mmdManager.seekToBoundary(endFrame);
         this.btnPlay.style.display = "flex";
         this.btnPause.style.display = "none";
         this.setStatus("Stopped", false);

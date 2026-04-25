@@ -1,6 +1,6 @@
 # MMD基本機能タスクチェックリスト
 
-更新日: 2026-03-23
+更新日: 2026-04-13
 
 ## 対象ファイル
 
@@ -49,8 +49,8 @@
 - [x] PNG 出力
 - [x] WebM 出力
 - [x] UI 非表示モード
-- [ ] 背景画像インポート
-- [ ] 背景動画インポート
+- [x] 背景画像インポート
+- [x] 背景動画インポート
 
 補足:
 - 動画出力は `WebM` 採用
@@ -84,7 +84,7 @@
 - [x] 情報欄で `0: Camera` を表示し、対象選択をカメラ / モデルで統一
 - [x] 情報欄からモデル表示 / 削除を操作可能
 - [x] ボーン欄とモーフ欄の登録ボタン配置
-- [ ] タイムライン上で選択ボーンの `X/Y/Z` 回転量を色分け表示
+- [x] タイムライン上で選択ボーンの `X/Y/Z` 回転量を色分け表示
 - [x] タイムライン選択とボーン欄 / 3D 選択の同期
 - [x] PMX ボーン一覧表示
 - [x] PMX 表示枠 / モーフ一覧表示
@@ -97,9 +97,9 @@
 
 - [x] 時間軸を 30fps 基準フレームで統一
 - [x] キー有無表示（Bone / Morph / Property / Camera）
-- [ ] ボーン補間編集（X/Y/Z/回転 の 4ch）
-- [ ] カメラ補間編集（X/Y/Z/回転/距離/FoV の 6ch）
-- [ ] 補間パラメータの `0..127` 編集
+- [x] ボーン補間編集（X/Y/Z/回転 の 4ch）
+- [x] カメラ補間編集（X/Y/Z/回転/距離/FoV の 6ch）
+- [x] 補間パラメータの `0..127` 編集
 - [ ] Property（表示 / IK）を補間つきでプレビュー
 - [x] ボーンキーフレーム登録後にフレーム移動しても表示が破綻しない
 - [x] カメラキーフレーム登録後にフレーム移動しても左右反転しない
@@ -108,8 +108,8 @@
 - [ ] VMD 書き出し時に補間 / Property 情報を保持
 
 補足:
-- 補間編集はまだ手つかず
-- ボーン / カメラの登録・フレーム移動・再生安定化までは完了
+- ボーン / カメラ補間のドラッグ編集、コピー / ペースト / 線形化までは完了
+- Property 補間、VMD 書き出し保持、回転補間の MMD 互換性確認は未完了
 
 ### 3-4. UI / 入出力整備
 
@@ -164,6 +164,7 @@
 - [ ] 配布時アセット / wasm / モデルローダー同梱確認
 - [ ] Windows 配布時の注意点整理
 - [ ] クリーン環境でのインストール / 起動確認
+- [x] WebGPU 必須のローカル起動スモークテスト追加（`npm.cmd run smoke:launch`）
 - [ ] 配布用ドキュメント整備
 
 ## 8. 拡張候補
@@ -179,14 +180,24 @@
 
 ## 直近の優先タスク
 
+- [ ] v0.1.7 フィードバックの確認と切り分け（`docs/v0.1.7-feedback.md`）
+- [ ] プロジェクト保存 / 読み込みの round-trip 確認（音声、カメラ VMD、照明、DoF / LUT / Bloom / Fog）
+- [ ] 基礎機能チェックリストの未完了項目を優先度順に埋める
 - [ ] Property（表示 / IK）のタイムライン保存・プレビュー・補間対応
-- [ ] 補間編集 UI と保存処理の実装
+- [x] 補間編集 UI と保存処理の実装
 - [ ] オートキー登録時の対象制御（ボーンのみ / カメラのみ / 選択対象のみ など）
 - [ ] キー登録まわりの操作整理（登録/上書き/削除/一括登録の UI と導線整理）
 - [ ] 回転補間の MMD 互換性確認
 - [ ] VMD 新規登録分の書き出し
 - [ ] 物理モード比較検証
 - [ ] `TrackAdapter` 相当の責務分離設計
+
+## 2026-04-13 今週の作業方針
+
+- v0.1.7 で出たユーザー報告は `docs/v0.1.7-feedback.md` に集約し、再現条件と影響範囲を先に切り分ける
+- 並行して、MMD 本体機能に直結する基礎機能の未完了項目を埋める
+- 優先して見る領域は、プロジェクト保存 / 読み込み、カメラ VMD / WebM 出力 / 物理挙動 / macOS FPS / カメラ距離起因の表示欠け
+- 新規の汎用 3D 形式拡張や実験基盤より、タイムライン、カメラ、出力、物理の安定化を優先する
 
 ## 2026-04-02 時点の見直し
 
@@ -212,8 +223,8 @@
 
 ## ログ機能メモ
 
-- [ ] アプリ内ログ機能の整備（info / warn / error）
-- [ ] ログファイル保存（main / renderer / 日付単位）
+- [x] アプリ内ログ機能の整備（info / warn / error）
+- [x] ログファイル保存（main / renderer / 日付単位）
 - [ ] ログフォルダを開く導線
 - [ ] 最新ログの確認 / コピー導線
 - [ ] デバッグログ ON/OFF
@@ -239,15 +250,26 @@
 - [ ] 実験機能フラグ管理
 - [ ] パフォーマンス計測基盤の整備
 - [ ] 責務分離を意識したリファクタリング
-- [ ] テスト計画の作成
-- [ ] `unit / integration / manual` の切り分け整理
-- [ ] 優先テスト対象の決定
-- [ ] 単体テスト基盤の整備
-- [ ] 重要ロジックの単体テスト追加
+- [x] テスト計画の作成 → [testing-strategy-proposal.md](testing-strategy-proposal.md)
+- [x] `unit / integration / manual` の切り分け整理 → 同上
+- [x] 優先テスト対象の決定 → 同上
+- [x] 単体テスト基盤の整備（Vitest 導入）
+- [x] 重要ロジックの単体テスト追加
+- [x] Electron ローカル起動スモークテスト導線の追加（WebGPU 判定込み） → [electron-local-smoke-test-plan.md](electron-local-smoke-test-plan.md)
 
 ## 参考リンク
+
+## 2026-04-18 メモ
+
+- [ ] WebGPU 重量モデルでの顔モーフ崩れは当面既知制限として扱う → [webgpu-heavy-model-face-morph-limit-2026-04-18.md](./webgpu-heavy-model-face-morph-limit-2026-04-18.md)
 
 - [mmd-project-positioning-note.md](/d:/DevTools/Projects/MMD_modoki/docs/mmd-project-positioning-note.md)
 - [glb-loading-investigation-2026-04-01.md](/d:/DevTools/Projects/MMD_modoki/docs/glb-loading-investigation-2026-04-01.md)
 - [generic-object-panel-design.md](/d:/DevTools/Projects/MMD_modoki/docs/generic-object-panel-design.md)
 - [sqlite-wasm-experiment-note.md](/d:/DevTools/Projects/MMD_modoki/docs/sqlite-wasm-experiment-note.md)
+
+## 2026-04-20 メモ
+
+- [ ] タイムライン対象項目の拡張方針整理（照明 / scene object / 非 Babylon-mmd 項目）
+
+- [ ] 材質非表示を選べるようにする

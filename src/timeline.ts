@@ -15,13 +15,21 @@
  *   - Label canvas (#timeline-label-canvas): redraws on setKeyframeTracks / resize
  *   - Bidirectional scroll sync: labelsEl ↔ trackScrollEl
  */
-import type { KeyframeTrack, TrackCategory } from "./types";
+import type { KeyframeTrack, TimelineRotationOverlay, TrackCategory } from "./types";
 
 // ── Layout ─────────────────────────────────────────────────────────
 const RULER_H = 20;
 const ROW_H = 18;
+const SELECTED_ROW_H = 36;
 const PX_PER_F = 6;
-const PLAYHEAD_X = 24;
+const PLAYHEAD_X_FALLBACK = 24;
+const WAVEFORM_H = 22;
+const ROTATION_OVERLAY_PAD_Y = 4;
+const ROTATION_OVERLAY_MIN_RANGE = 15;
+const ROTATION_OVERLAY_WRAP_BOUNDARY = 180;
+const ROTATION_OVERLAY_WRAP_THRESHOLD = 180;
+const TRACK_ROW_BG = "#1a1c22";
+const TRACK_ROW_BG_SELECTED = "rgba(255,255,255,0.07)";
 const CURRENT_FRAME_COLOR = "#ff4fa3";
 const CURRENT_FRAME_GLOW = "rgba(255,79,163,0.5)";
 const UI_FONT_FAMILY = "'Noto Sans CJK OTC', 'Noto Sans CJK JP', 'Segoe UI Variable', 'Segoe UI', 'Yu Gothic UI', 'Meiryo UI', sans-serif";
@@ -85,6 +93,12 @@ function drawDiamondMarker(
     ctx.restore();
 }
 
+function resolveCssVarColor(name: string, fallback: string): string {
+    const rootStyle = getComputedStyle(document.documentElement);
+    const resolved = rootStyle.getPropertyValue(name).trim();
+    return resolved || fallback;
+}
+
 export class Timeline {
     // DOM
     private staticCanvas: HTMLCanvasElement;
@@ -93,6 +107,8 @@ export class Timeline {
     private overlayCtx: CanvasRenderingContext2D;
     private labelCanvas: HTMLCanvasElement;
     private labelCtx: CanvasRenderingContext2D;
+    private waveformCanvas: HTMLCanvasElement | null;
+    private waveformCtx: CanvasRenderingContext2D | null;
     private labelsEl: HTMLElement;
     private trackScrollEl: HTMLElement;
 
@@ -103,6 +119,8 @@ export class Timeline {
     private viewOffset = 0;   // currentFrame * PX_PER_F
     private selectedTrackIndex = -1;
     private selectedFrame: number | null = null;
+    private waveformPeaks: Float32Array | null = null;
+    private rotationOverlay: TimelineRotationOverlay | null = null;
 
     // Drag-seek
     private isDragging = false;
@@ -113,6 +131,7 @@ export class Timeline {
     private staticRaf: number | null = null;
     private overlayRaf: number | null = null;
     private labelRaf: number | null = null;
+    private waveformRaf: number | null = null;
 
     // Scroll sync guard
     private syncingScroll = false;
@@ -132,11 +151,13 @@ export class Timeline {
         this.overlayCanvas = document.getElementById("timeline-overlay-canvas") as HTMLCanvasElement;
         this.trackScrollEl = document.getElementById(trackScrollId) as HTMLElement;
         this.labelCanvas = document.getElementById(labelCanvasId) as HTMLCanvasElement;
+        this.waveformCanvas = document.getElementById("timeline-waveform-canvas") as HTMLCanvasElement | null;
         this.labelsEl = document.getElementById(labelsElId) as HTMLElement;
 
         this.staticCtx = this.staticCanvas.getContext("2d")!;
         this.overlayCtx = this.overlayCanvas.getContext("2d")!;
         this.labelCtx = this.labelCanvas.getContext("2d")!;
+        this.waveformCtx = this.waveformCanvas?.getContext("2d") ?? null;
 
         this.setupEvents();
         this.resize();
@@ -184,6 +205,7 @@ export class Timeline {
                 this.onSeek?.(frame);
                 this.scheduleOverlay();
                 this.scheduleStatic();
+                this.scheduleWaveform();
             }
         });
         window.addEventListener("mouseup", () => { this.isDragging = false; });
@@ -206,17 +228,26 @@ export class Timeline {
         }, { passive: true });
     }
 
+    private getPlayheadX(): number {
+        const labelWidth = this.labelsEl.clientWidth;
+        const trackWidth = this.trackScrollEl.clientWidth;
+        if (labelWidth <= 0 || trackWidth <= 0) return PLAYHEAD_X_FALLBACK;
+        return Math.max(12, Math.round((trackWidth - labelWidth) / 2));
+    }
+
     private seekFromEvent(e: MouseEvent, canvas: HTMLCanvasElement): void {
         const rect = canvas.getBoundingClientRect();
+        const playheadX = this.getPlayheadX();
         const frame = Math.max(
             0,
-            Math.round(this.currentFrame + (e.clientX - rect.left - PLAYHEAD_X) / PX_PER_F)
+            Math.round(this.currentFrame + (e.clientX - rect.left - playheadX) / PX_PER_F)
         );
         this.currentFrame = frame;
         this.viewOffset = frame * PX_PER_F;
         this.onSeek?.(frame);
         this.scheduleOverlay();
         this.scheduleStatic();
+        this.scheduleWaveform();
     }
 
     // ── Public API ───────────────────────────────────────────────────
@@ -228,6 +259,7 @@ export class Timeline {
         this.viewOffset = normalized * PX_PER_F;
         this.scheduleOverlay(); // ruler + playhead
         this.scheduleStatic();  // keyframe dots scroll with playhead
+        this.scheduleWaveform();
     }
 
     setTotalFrames(total: number): void {
@@ -235,6 +267,12 @@ export class Timeline {
         if (this.totalFrames === normalized) return;
         this.totalFrames = normalized;
         this.scheduleOverlay();
+        this.scheduleWaveform();
+    }
+
+    setWaveformPeaks(peaks: Float32Array | null): void {
+        this.waveformPeaks = peaks;
+        this.scheduleWaveform();
     }
 
     setKeyframeTracks(tracks: KeyframeTrack[]): void {
@@ -242,6 +280,11 @@ export class Timeline {
         this.tracks = tracks;
         this.reconcileSelection(prevSelectedTrack);
         this.resize();
+    }
+
+    setSelectedTrackRotationOverlay(overlay: TimelineRotationOverlay | null): void {
+        this.rotationOverlay = overlay;
+        this.scheduleStatic();
     }
 
     getSelectedTrack(): KeyframeTrack | null {
@@ -286,8 +329,7 @@ export class Timeline {
         const changed = this.selectedTrackIndex !== targetIndex || this.selectedFrame !== null;
         this.selectedTrackIndex = targetIndex;
         this.selectedFrame = null;
-        this.scheduleStatic();
-        this.scheduleLabel();
+        this.resize();
         if (changed) {
             this.emitSelectionChanged();
         }
@@ -301,7 +343,7 @@ export class Timeline {
         // Keep the track area scroll range aligned with the label column.
         // The label canvas includes the ruler row at the top, so the track canvas
         // gets a matching spacer at the bottom to avoid scroll drift near the end.
-        const trackRowsH = Math.max(1, this.tracks.length) * ROW_H;
+        const trackRowsH = this.getTrackRowsHeight();
         const trackContentH = trackRowsH + RULER_H;
         const tw = this.trackScrollEl.clientWidth || 400;
 
@@ -328,9 +370,18 @@ export class Timeline {
         this.labelCanvas.style.height = `${totalH}px`;
         this.labelCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
+        if (this.waveformCanvas && this.waveformCtx) {
+            this.waveformCanvas.width = tw * dpr;
+            this.waveformCanvas.height = WAVEFORM_H * dpr;
+            this.waveformCanvas.style.width = `${tw}px`;
+            this.waveformCanvas.style.height = `${WAVEFORM_H}px`;
+            this.waveformCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        }
+
         this.scheduleStatic();
         this.scheduleOverlay();
         this.scheduleLabel();
+        this.scheduleWaveform();
     }
 
     // ── RAF schedulers ────────────────────────────────────────────────
@@ -356,6 +407,13 @@ export class Timeline {
             this.drawLabel();
         });
     }
+    private scheduleWaveform(): void {
+        if (this.waveformRaf !== null || !this.waveformCanvas || !this.waveformCtx) return;
+        this.waveformRaf = requestAnimationFrame(() => {
+            this.waveformRaf = null;
+            this.drawWaveform();
+        });
+    }
 
     // ── Static layer: track row bgs + keyframe dots ──────────────────
 
@@ -363,6 +421,7 @@ export class Timeline {
         const ctx = this.staticCtx;
         const w = this.staticCanvas.width / (window.devicePixelRatio || 1);
         const h = this.staticCanvas.height / (window.devicePixelRatio || 1);
+        const playheadX = this.getPlayheadX();
 
         ctx.fillStyle = "#12121a";
         ctx.fillRect(0, 0, w, h);
@@ -373,47 +432,47 @@ export class Timeline {
             return;
         }
 
-        const visStart = Math.max(0, Math.floor((this.viewOffset - PLAYHEAD_X) / PX_PER_F));
+        const visStart = Math.max(0, Math.floor((this.viewOffset - playheadX) / PX_PER_F));
         const visEnd = Math.min(this.totalFrames, visStart + Math.ceil(w / PX_PER_F) + 2);
 
         // Vertical culling: only draw rows visible in the scroll viewport
         const scrollTop = this.trackScrollEl.scrollTop;
         const viewH = this.trackScrollEl.clientHeight || h;
-        const firstRow = Math.max(0, Math.floor(scrollTop / ROW_H) - 1);
-        const lastRow = Math.min(this.tracks.length - 1, Math.ceil((scrollTop + viewH) / ROW_H) + 1);
+        const firstRow = this.getRowIndexAtOffset(scrollTop, true);
+        const lastRow = this.getRowIndexAtOffset(scrollTop + viewH, true);
 
         for (let i = firstRow; i <= lastRow; i++) {
             const track = this.tracks[i];
-            const ry = i * ROW_H;   // NO ruler offset – ruler is outside scroll
+            const ry = this.getRowTop(i);   // NO ruler offset – ruler is outside scroll
+            const rowH = this.getRowHeight(i);
             const col = CAT[track.category];
             const isSelectedRow = i === this.selectedTrackIndex;
 
-            ctx.fillStyle = col.bg;
-            ctx.fillRect(0, ry, w, ROW_H);
+            ctx.fillStyle = TRACK_ROW_BG;
+            ctx.fillRect(0, ry, w, rowH);
 
             if (isSelectedRow) {
-                ctx.fillStyle = "rgba(99,102,241,0.18)";
-                ctx.fillRect(0, ry, w, ROW_H);
-            }
-
-            if (col.bar) {
-                ctx.fillStyle = col.bar;
-                ctx.fillRect(0, ry, 2, ROW_H);
+                ctx.fillStyle = TRACK_ROW_BG_SELECTED;
+                ctx.fillRect(0, ry, w, rowH);
             }
 
             // Row separator
             ctx.fillStyle = "rgba(255,255,255,0.04)";
-            ctx.fillRect(0, ry + ROW_H - 1, w, 1);
+            ctx.fillRect(0, ry + rowH - 1, w, 1);
+
+            if (isSelectedRow) {
+                this.drawSelectedTrackRotationOverlay(ctx, track, ry, rowH, visStart, visEnd, w);
+            }
 
             // Keyframe markers (binary search)
             const frames = track.frames;
             const lo = lowerBound(frames, visStart);
             const hi = upperBound(frames, visEnd);
             const markerSize = track.category === "root" ? 9 : track.category === "camera" ? 8 : 6;
-            const midY = ry + ROW_H / 2;
+            const midY = ry + rowH / 2;
 
             for (let k = lo; k <= hi && k < frames.length; k++) {
-                const sx = frames[k] * PX_PER_F - this.viewOffset + PLAYHEAD_X;
+                const sx = frames[k] * PX_PER_F - this.viewOffset + playheadX;
                 if (sx < -markerSize || sx > w + markerSize) continue;
                 drawDiamondMarker(ctx, sx, midY, markerSize, col.kf);
 
@@ -427,7 +486,7 @@ export class Timeline {
         // Major frame vertical grid
         ctx.fillStyle = "rgba(255,255,255,0.03)";
         for (let f = Math.ceil(visStart / 10) * 10; f <= visEnd; f += 10) {
-            const sx = f * PX_PER_F - this.viewOffset + PLAYHEAD_X;
+            const sx = f * PX_PER_F - this.viewOffset + playheadX;
             ctx.fillRect(sx, 0, 1, h);
         }
 
@@ -438,8 +497,8 @@ export class Timeline {
         ctx.strokeStyle = CURRENT_FRAME_GLOW;
         ctx.lineWidth = 1;
         ctx.beginPath();
-        ctx.moveTo(PLAYHEAD_X, 0);
-        ctx.lineTo(PLAYHEAD_X, h);
+        ctx.moveTo(playheadX, 0);
+        ctx.lineTo(playheadX, h);
         ctx.stroke();
         ctx.restore();
     }
@@ -449,6 +508,7 @@ export class Timeline {
     private drawOverlay(): void {
         const ctx = this.overlayCtx;
         const w = this.overlayCanvas.width / (window.devicePixelRatio || 1);
+        const playheadX = this.getPlayheadX();
 
         ctx.fillStyle = "#0e0e1a";
         ctx.fillRect(0, 0, w, RULER_H);
@@ -457,12 +517,12 @@ export class Timeline {
         ctx.fillStyle = "rgba(255,255,255,0.08)";
         ctx.fillRect(0, RULER_H - 1, w, 1);
 
-        const visStart = Math.max(0, Math.floor((this.viewOffset - PLAYHEAD_X) / PX_PER_F));
+        const visStart = Math.max(0, Math.floor((this.viewOffset - playheadX) / PX_PER_F));
         const visEnd = Math.min(this.totalFrames, visStart + Math.ceil(w / PX_PER_F) + 2);
 
         // Ruler ticks + labels
         for (let f = visStart; f <= visEnd; f++) {
-            const sx = f * PX_PER_F - this.viewOffset + PLAYHEAD_X;
+            const sx = f * PX_PER_F - this.viewOffset + playheadX;
             const isMajor = f % 10 === 0;
             const isMid = f % 5 === 0 && !isMajor;
 
@@ -480,7 +540,7 @@ export class Timeline {
         }
 
         // Playhead diamond
-        const px = PLAYHEAD_X;
+        const px = playheadX;
         ctx.fillStyle = CURRENT_FRAME_COLOR;
         ctx.beginPath();
         ctx.moveTo(px - 6, 0);
@@ -497,6 +557,68 @@ export class Timeline {
         ctx.textAlign = "center";
         ctx.textBaseline = "top";
         ctx.fillText(String(this.currentFrame), px, 3);
+    }
+
+    private drawWaveform(): void {
+        if (!this.waveformCanvas || !this.waveformCtx) return;
+
+        const ctx = this.waveformCtx;
+        const w = this.waveformCanvas.width / (window.devicePixelRatio || 1);
+        const h = this.waveformCanvas.height / (window.devicePixelRatio || 1);
+        const midY = h / 2;
+        const playheadX = this.getPlayheadX();
+
+        ctx.clearRect(0, 0, w, h);
+        ctx.fillStyle = "#0c0c14";
+        ctx.fillRect(0, 0, w, h);
+
+        ctx.fillStyle = "rgba(255,255,255,0.05)";
+        ctx.fillRect(0, h - 1, w, 1);
+
+        const visStart = Math.max(0, Math.floor((this.viewOffset - playheadX) / PX_PER_F));
+        const visEnd = Math.min(this.totalFrames, visStart + Math.ceil(w / PX_PER_F) + 2);
+
+        for (let f = Math.ceil(visStart / 10) * 10; f <= visEnd; f += 10) {
+            const sx = f * PX_PER_F - this.viewOffset + playheadX;
+            ctx.fillStyle = "rgba(255,255,255,0.035)";
+            ctx.fillRect(sx, 0, 1, h);
+        }
+
+        ctx.fillStyle = "rgba(255,255,255,0.12)";
+        ctx.fillRect(0, Math.round(midY), w, 1);
+
+        if (this.waveformPeaks && this.waveformPeaks.length > 0) {
+            ctx.strokeStyle = "rgba(59,130,246,0.95)";
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+
+            const peakEnd = Math.min(visEnd, this.waveformPeaks.length - 1);
+            for (let frame = Math.max(0, visStart); frame <= peakEnd; frame += 1) {
+                const peak = Math.max(0, Math.min(1, this.waveformPeaks[frame] ?? 0));
+                const amp = Math.max(1, peak * (midY - 2));
+                const sx = Math.round(frame * PX_PER_F - this.viewOffset + playheadX) + 0.5;
+                ctx.moveTo(sx, midY - amp);
+                ctx.lineTo(sx, midY + amp);
+            }
+            ctx.stroke();
+        } else {
+            ctx.font = `500 10px ${UI_FONT_FAMILY}`;
+            ctx.fillStyle = "rgba(255,255,255,0.24)";
+            ctx.textAlign = "left";
+            ctx.textBaseline = "middle";
+            ctx.fillText("Waveform", 8, midY);
+        }
+
+        ctx.save();
+        ctx.shadowColor = CURRENT_FRAME_GLOW;
+        ctx.shadowBlur = 6;
+        ctx.strokeStyle = CURRENT_FRAME_GLOW;
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(playheadX, 0);
+        ctx.lineTo(playheadX, h);
+        ctx.stroke();
+        ctx.restore();
     }
 
     // ── Label column ─────────────────────────────────────────────────
@@ -526,26 +648,27 @@ export class Timeline {
 
         for (let i = 0; i < this.tracks.length; i++) {
             const track = this.tracks[i];
-            const y = RULER_H + i * ROW_H;
+            const rowH = this.getRowHeight(i);
+            const y = RULER_H + this.getRowTop(i);
             const col = CAT[track.category];
             const isSelectedRow = i === this.selectedTrackIndex;
 
             ctx.fillStyle = col.bg;
-            ctx.fillRect(0, y, w, ROW_H);
+            ctx.fillRect(0, y, w, rowH);
 
             if (isSelectedRow) {
                 ctx.fillStyle = "rgba(99,102,241,0.18)";
-                ctx.fillRect(0, y, w, ROW_H);
+                ctx.fillRect(0, y, w, rowH);
             }
 
             if (col.bar) {
                 ctx.fillStyle = col.bar;
-                ctx.fillRect(0, y, 2, ROW_H);
+                ctx.fillRect(0, y, 2, rowH);
             }
 
             ctx.save();
             ctx.beginPath();
-            ctx.rect(4, y, w - 6, ROW_H);
+            ctx.rect(4, y, w - 6, rowH);
             ctx.clip();
             ctx.font = (track.category === "root" || track.category === "camera")
                 ? `600 10px ${UI_FONT_FAMILY}`
@@ -553,11 +676,11 @@ export class Timeline {
             ctx.fillStyle = col.text;
             ctx.textAlign = "left";
             ctx.textBaseline = "middle";
-            ctx.fillText(track.name, 6, y + ROW_H / 2);
+            ctx.fillText(track.name, 6, y + rowH / 2);
             ctx.restore();
 
             ctx.fillStyle = "rgba(255,255,255,0.04)";
-            ctx.fillRect(0, y + ROW_H - 1, w, 1);
+            ctx.fillRect(0, y + rowH - 1, w, 1);
         }
     }
 
@@ -565,34 +688,43 @@ export class Timeline {
         const rect = this.staticCanvas.getBoundingClientRect();
         const localX = e.clientX - rect.left;
         const localY = e.clientY - rect.top;
-        const row = Math.floor(localY / ROW_H);
+        const row = this.getRowIndexAtOffset(localY);
         if (row < 0 || row >= this.tracks.length) return;
 
+        const selectionChanged = this.selectedTrackIndex !== row;
         this.selectedTrackIndex = row;
         const pickedFrame = this.pickFrameOnTrackFromX(this.tracks[row], localX);
         this.selectedFrame = pickedFrame;
-        this.scheduleStatic();
-        this.scheduleLabel();
+        if (selectionChanged) this.resize();
+        else {
+            this.scheduleStatic();
+            this.scheduleLabel();
+        }
         this.emitSelectionChanged();
     }
 
     private selectTrackFromLabelEvent(e: MouseEvent): void {
         const rect = this.labelCanvas.getBoundingClientRect();
         const localY = e.clientY - rect.top;
-        const row = Math.floor((localY - RULER_H) / ROW_H);
+        const row = this.getRowIndexAtOffset(localY - RULER_H);
         if (row < 0 || row >= this.tracks.length) return;
 
+        const selectionChanged = this.selectedTrackIndex !== row;
         this.selectedTrackIndex = row;
         this.selectedFrame = null;
-        this.scheduleStatic();
-        this.scheduleLabel();
+        if (selectionChanged) this.resize();
+        else {
+            this.scheduleStatic();
+            this.scheduleLabel();
+        }
         this.emitSelectionChanged();
     }
 
     private pickFrameOnTrackFromX(track: KeyframeTrack, localX: number): number | null {
         if (track.frames.length === 0) return null;
 
-        const frameAtCursor = this.currentFrame + (localX - PLAYHEAD_X) / PX_PER_F;
+        const playheadX = this.getPlayheadX();
+        const frameAtCursor = this.currentFrame + (localX - playheadX) / PX_PER_F;
         const nearestFrame = Math.round(frameAtCursor);
         const idx = lowerBound(track.frames, nearestFrame);
 
@@ -603,7 +735,7 @@ export class Timeline {
         let bestFrame: number | null = null;
         let bestDist = Number.POSITIVE_INFINITY;
         for (const frame of candidates) {
-            const sx = frame * PX_PER_F - this.viewOffset + PLAYHEAD_X;
+            const sx = frame * PX_PER_F - this.viewOffset + playheadX;
             const dist = Math.abs(sx - localX);
             if (dist < bestDist) {
                 bestDist = dist;
@@ -644,6 +776,203 @@ export class Timeline {
         }
 
         this.emitSelectionChanged();
+    }
+
+    private drawSelectedTrackRotationOverlay(
+        ctx: CanvasRenderingContext2D,
+        track: KeyframeTrack,
+        rowTop: number,
+        rowHeight: number,
+        visStart: number,
+        visEnd: number,
+        width: number,
+    ): void {
+        const overlay = this.rotationOverlay;
+        if (!overlay) return;
+        if (overlay.trackName !== track.name || overlay.trackCategory !== track.category) return;
+        if (overlay.frames.length === 0) return;
+
+        const firstVisibleIndex = lowerBound(overlay.frames, visStart);
+        const lastVisibleIndex = upperBound(overlay.frames, visEnd);
+        if (firstVisibleIndex >= overlay.frames.length || lastVisibleIndex < 0) return;
+
+        const startIndex = Math.max(0, firstVisibleIndex - 1);
+        const endIndex = Math.min(overlay.frames.length - 1, Math.max(lastVisibleIndex + 1, startIndex));
+        const innerHeight = Math.max(1, rowHeight - ROTATION_OVERLAY_PAD_Y * 2);
+        const range = Math.max(ROTATION_OVERLAY_MIN_RANGE, overlay.maxAbsValue, 1);
+        const zeroY = rowTop + ROTATION_OVERLAY_PAD_Y + innerHeight / 2;
+
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(0, rowTop, width, rowHeight);
+        ctx.clip();
+
+        ctx.strokeStyle = "rgba(255,255,255,0.08)";
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(0, zeroY + 0.5);
+        ctx.lineTo(width, zeroY + 0.5);
+        ctx.stroke();
+
+        this.drawRotationAxisPolyline(
+            ctx,
+            overlay.frames,
+            overlay.x,
+            startIndex,
+            endIndex,
+            rowTop,
+            innerHeight,
+            range,
+            resolveCssVarColor("--axis-x-color", "#ff2b2b"),
+        );
+        this.drawRotationAxisPolyline(
+            ctx,
+            overlay.frames,
+            overlay.y,
+            startIndex,
+            endIndex,
+            rowTop,
+            innerHeight,
+            range,
+            resolveCssVarColor("--axis-y-color", "#00d83a"),
+        );
+        this.drawRotationAxisPolyline(
+            ctx,
+            overlay.frames,
+            overlay.z,
+            startIndex,
+            endIndex,
+            rowTop,
+            innerHeight,
+            range,
+            resolveCssVarColor("--axis-z-color", "#1b4dff"),
+        );
+
+        ctx.restore();
+    }
+
+    private drawRotationAxisPolyline(
+        ctx: CanvasRenderingContext2D,
+        frames: Uint32Array,
+        values: Float32Array,
+        startIndex: number,
+        endIndex: number,
+        rowTop: number,
+        innerHeight: number,
+        range: number,
+        strokeStyle: string,
+    ): void {
+        if (startIndex > endIndex) return;
+
+        const playheadX = this.getPlayheadX();
+        const topY = rowTop + ROTATION_OVERLAY_PAD_Y;
+        const bottomY = topY + innerHeight;
+        ctx.save();
+        ctx.globalAlpha = 0.6;
+        ctx.strokeStyle = strokeStyle;
+        ctx.lineWidth = 1.25;
+        ctx.lineJoin = "round";
+        ctx.lineCap = "round";
+        ctx.beginPath();
+
+        for (let i = startIndex; i <= endIndex; i += 1) {
+            const x = frames[i] * PX_PER_F - this.viewOffset + playheadX;
+            const y = this.getRotationOverlayValueY(values[i], topY, innerHeight, range);
+            if (i === startIndex) {
+                ctx.moveTo(x, y);
+                continue;
+            }
+
+            const prevX = frames[i - 1] * PX_PER_F - this.viewOffset + playheadX;
+            const prevValue = values[i - 1];
+            const nextValue = values[i];
+
+            if (!this.isRotationOverlayWrappedSegment(prevValue, nextValue)) {
+                ctx.lineTo(x, y);
+                continue;
+            }
+
+            const boundaryX = this.getRotationOverlayWrapBoundaryX(prevX, x, prevValue, nextValue);
+            const wrapsThroughTop = nextValue < prevValue;
+            ctx.lineTo(boundaryX, wrapsThroughTop ? topY : bottomY);
+            ctx.stroke();
+            ctx.beginPath();
+            ctx.moveTo(boundaryX, wrapsThroughTop ? bottomY : topY);
+            ctx.lineTo(x, y);
+        }
+
+        ctx.stroke();
+        ctx.restore();
+    }
+
+    private getRotationOverlayValueY(value: number, topY: number, innerHeight: number, range: number): number {
+        const normalized = (range - value) / (range * 2);
+        return topY + normalized * innerHeight;
+    }
+
+    private isRotationOverlayWrappedSegment(previous: number, next: number): boolean {
+        return Math.abs(next - previous) > ROTATION_OVERLAY_WRAP_THRESHOLD;
+    }
+
+    private getRotationOverlayWrapBoundaryX(
+        previousX: number,
+        nextX: number,
+        previousValue: number,
+        nextValue: number,
+    ): number {
+        const span = nextX - previousX;
+        if (span === 0) return previousX;
+
+        if (nextValue < previousValue) {
+            const toUpper = Math.max(0, ROTATION_OVERLAY_WRAP_BOUNDARY - previousValue);
+            const fromLower = Math.max(0, nextValue + ROTATION_OVERLAY_WRAP_BOUNDARY);
+            const total = toUpper + fromLower;
+            const t = total > 0 ? toUpper / total : 0.5;
+            return previousX + span * t;
+        }
+
+        const toLower = Math.max(0, previousValue + ROTATION_OVERLAY_WRAP_BOUNDARY);
+        const fromUpper = Math.max(0, ROTATION_OVERLAY_WRAP_BOUNDARY - nextValue);
+        const total = toLower + fromUpper;
+        const t = total > 0 ? toLower / total : 0.5;
+        return previousX + span * t;
+    }
+
+    private getRowHeight(index: number): number {
+        return index >= 0 && index === this.selectedTrackIndex ? SELECTED_ROW_H : ROW_H;
+    }
+
+    private getTrackRowsHeight(): number {
+        if (this.tracks.length === 0) return ROW_H;
+
+        let total = 0;
+        for (let i = 0; i < this.tracks.length; i += 1) {
+            total += this.getRowHeight(i);
+        }
+        return total;
+    }
+
+    private getRowTop(index: number): number {
+        if (index <= 0) return 0;
+
+        let top = 0;
+        for (let i = 0; i < index; i += 1) {
+            top += this.getRowHeight(i);
+        }
+        return top;
+    }
+
+    private getRowIndexAtOffset(offsetY: number, clampToRange = false): number {
+        if (this.tracks.length === 0) return -1;
+        if (offsetY < 0) return clampToRange ? 0 : -1;
+
+        let top = 0;
+        for (let i = 0; i < this.tracks.length; i += 1) {
+            const rowH = this.getRowHeight(i);
+            if (offsetY < top + rowH) return i;
+            top += rowH;
+        }
+        return clampToRange ? this.tracks.length - 1 : -1;
     }
 
     private emitSelectionChanged(): void {

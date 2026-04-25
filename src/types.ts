@@ -44,9 +44,55 @@ export interface ElectronAPI {
     reportWebmExportProgress: (progress: WebmExportProgress) => void;
     onWebmExportState: (callback: (state: WebmExportState) => void) => () => void;
     onWebmExportProgress: (callback: (progress: WebmExportProgress) => void) => () => void;
+    logDebug: (scope: AppLogScope, message: string, data?: AppLogData) => void;
+    logInfo: (scope: AppLogScope, message: string, data?: AppLogData) => void;
+    logWarn: (scope: AppLogScope, message: string, data?: AppLogData) => void;
+    logError: (scope: AppLogScope, message: string, data?: AppLogData) => void;
+    reportSmokeRendererReady: (payload: SmokeRendererReadyPayload) => void;
+    reportSmokeRendererFailure: (payload: SmokeRendererFailurePayload) => void;
+    getLogFileInfo: () => Promise<AppLogFileInfo>;
+    openLogFolder: () => Promise<boolean>;
 }
 
 export type UiLocale = "ja" | "en" | "zh-Hant" | "zh-Hans" | "ko";
+
+export type AppLogLevel = "debug" | "info" | "warn" | "error";
+
+export type AppLogScope =
+    | "main"
+    | "ipc"
+    | "renderer"
+    | "asset"
+    | "camera-vmd"
+    | "timeline"
+    | "webm"
+    | "physics"
+    | "shader"
+    | "project"
+    | "ui";
+
+export type AppLogData = Record<string, unknown>;
+
+export interface SmokeRendererReadyPayload {
+    engine: string;
+    physicsBackend: string;
+}
+
+export interface SmokeRendererFailurePayload {
+    message: string;
+    details?: AppLogData;
+}
+
+export interface AppLogFileInfo {
+    path: string;
+    directoryPath: string;
+    fileName: string;
+    level: AppLogLevel | "off";
+    sessionId: string;
+    appName: "MMD_modoki";
+    isDev: boolean;
+    maxSizeBytes: number;
+}
 
 declare global {
     interface Window {
@@ -114,6 +160,16 @@ export interface KeyframeTrack {
     category: TrackCategory;
     /** Frame numbers that have keyframes (sorted ascending) */
     frames: Uint32Array;
+}
+
+export interface TimelineRotationOverlay {
+    trackName: string;
+    trackCategory: TrackCategory;
+    frames: Uint32Array;
+    x: Float32Array;
+    y: Float32Array;
+    z: Float32Array;
+    maxAbsValue: number;
 }
 
 export interface InterpolationCurve {
@@ -215,6 +271,8 @@ export interface ProjectViewportState {
     groundVisible: boolean;
     skydomeVisible: boolean;
     antialiasEnabled: boolean;
+    backgroundImagePath?: string | null;
+    backgroundVideoPath?: string | null;
 }
 
 export interface ProjectPhysicsState {
@@ -228,12 +286,20 @@ export interface ProjectEffectState {
     dofEnabled: boolean;
     dofFocusDistanceMm: number;
     dofFocusOffsetMm?: number;
+    dofTargetModelPath?: string | null;
+    dofTargetBoneName?: string | null;
+    dofBlurLevel?: number;
     dofFStop: number;
+    dofNearSuppressionScale?: number;
     dofLensSize: number;
+    dofFocalLength?: number;
+    dofFocalLengthDistanceInverted?: boolean;
     dofLensBlurStrength: number;
     dofLensEdgeBlur: number;
+    dofLensDistortion?: number;
     dofLensDistortionInfluence: number;
     modelEdgeWidth: number;
+    contrast?: number;
     gamma: number;
     exposure?: number;
     toneMappingEnabled?: boolean;
@@ -299,6 +365,12 @@ export interface ProjectOutputState {
     fps?: number;
     includeAudio?: boolean;
     webmCodec?: "auto" | "vp8" | "vp9";
+    webmCaptureMode?: WebmCaptureMode;
+    usePlaybackRange?: boolean;
+    startFrame?: number;
+    endFrame?: number;
+    frameStartEnabled?: boolean;
+    frameStopEnabled?: boolean;
 }
 
 export interface ProjectAccessoryState {
@@ -444,6 +516,8 @@ export interface PngSequenceExportProgress {
     captured: number;
     total: number;
     frame: number;
+    startFrame?: number;
+    endFrame?: number;
 }
 
 export interface WebmExportRequest {
@@ -457,7 +531,10 @@ export interface WebmExportRequest {
     includeAudio?: boolean;
     audioFilePath?: string | null;
     preferredVideoCodec?: "auto" | "vp8" | "vp9";
+    captureMode?: WebmCaptureMode;
 }
+
+export type WebmCaptureMode = "readpixels" | "canvas" | "webgpu-copy";
 
 export interface WebmExportLaunchResult {
     jobId: string;
@@ -486,6 +563,8 @@ export interface WebmExportProgress {
     encoded: number;
     total: number;
     frame: number;
+    startFrame?: number;
+    endFrame?: number;
     captured?: number;
     message?: string;
     timestampMs: number;

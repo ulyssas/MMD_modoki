@@ -1,9 +1,13 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron';
 import type {
+    AppLogData,
+    AppLogScope,
     ElectronAPI,
     PngSequenceExportProgress,
     PngSequenceExportRequest,
     PngSequenceExportState,
+    SmokeRendererFailurePayload,
+    SmokeRendererReadyPayload,
     WebmExportProgress,
     WebmExportRequest,
     WebmExportState
@@ -117,4 +121,26 @@ contextBridge.exposeInMainWorld('electronAPI', {
             ipcRenderer.removeListener('export:webmProgress', listener);
         };
     },
+    logDebug: (scope: AppLogScope, message: string, data?: AppLogData) => {
+        ipcRenderer.send('log:write', 'debug', scope, message, data);
+    },
+    logInfo: (scope: AppLogScope, message: string, data?: AppLogData) => {
+        ipcRenderer.send('log:write', 'info', scope, message, data);
+    },
+    logWarn: (scope: AppLogScope, message: string, data?: AppLogData) => {
+        ipcRenderer.send('log:write', 'warn', scope, message, data);
+    },
+    logError: (scope: AppLogScope, message: string, data?: AppLogData) => {
+        ipcRenderer.send('log:write', 'error', scope, message, data);
+    },
+    reportSmokeRendererReady: (payload: SmokeRendererReadyPayload) => {
+        ipcRenderer.send('smoke:rendererReady', payload);
+    },
+    reportSmokeRendererFailure: (payload: SmokeRendererFailurePayload) => {
+        ipcRenderer.send('smoke:rendererFailure', payload);
+    },
+    getLogFileInfo: () =>
+        ipcRenderer.invoke('log:getFileInfo'),
+    openLogFolder: () =>
+        ipcRenderer.invoke('log:openFolder'),
 } as ElectronAPI);

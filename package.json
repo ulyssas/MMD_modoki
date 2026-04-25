@@ -1,7 +1,7 @@
 {
   "name": "mmd-modoki",
   "productName": "MMD modoki",
-  "version": "0.1.6",
+  "version": "0.1.8",
   "description": "Electron desktop app for previewing and editing MMD assets",
   "main": ".vite/build/main.js",
   "private": true,
@@ -12,7 +12,9 @@
     "make:zip": "electron-forge make --targets @electron-forge/maker-zip",
     "publish": "electron-forge publish",
     "generate:luts": "node scripts/generate-builtin-luts.js",
-    "lint": "eslint --ext .ts,.tsx ."
+    "smoke:launch": "node scripts/smoke-launch.mjs",
+    "lint": "eslint --ext .ts,.tsx .",
+    "test:unit": "vitest run --environment node"
   },
   "keywords": [],
   "author": {
@@ -38,13 +40,15 @@
     "eslint": "^8.57.1",
     "eslint-plugin-import": "^2.32.0",
     "typescript": "^5.9.3",
-    "vite": "^5.4.21"
+    "vite": "^5.4.21",
+    "vitest": "^2.1.9"
   },
   "dependencies": {
     "@babylonjs/core": "8.45.3",
     "@babylonjs/gui": "8.45.3",
     "@babylonjs/loaders": "8.45.3",
     "babylon-mmd": "^1.1.0",
+    "electron-log": "^5.4.3",
     "electron-squirrel-startup": "^1.0.1",
     "i18next": "^25.8.18",
     "mediabunny": "^1.39.1"

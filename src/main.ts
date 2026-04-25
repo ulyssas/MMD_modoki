@@ -1,18 +1,26 @@
-import { app, BrowserWindow, dialog, ipcMain, nativeImage, screen, session } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, nativeImage, screen, session, shell, type IpcMainEvent } from 'electron';
 import path from 'node:path';
 import fs from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { randomUUID } from 'node:crypto';
+import log from 'electron-log/main';
 import started from 'electron-squirrel-startup';
 import type {
+  AppLogData,
+  AppLogFileInfo,
+  AppLogLevel,
+  AppLogScope,
   PngSequenceExportLaunchResult,
   PngSequenceExportProgress,
   PngSequenceExportRequest,
   PngSequenceExportState,
+  WebmCaptureMode,
   WebmExportLaunchResult,
   WebmExportProgress,
   WebmExportRequest,
   WebmExportState,
+  SmokeRendererFailurePayload,
+  SmokeRendererReadyPayload,
 } from './types';
 
 // Handle creating/removing shortcuts on Windows when installing/uninstalling.
@@ -21,10 +29,129 @@ if (started) {
 }
 
 const isDev = Boolean(MAIN_WINDOW_VITE_DEV_SERVER_URL);
+const isSmokeMode = process.env.MMD_MODOKI_SMOKE === '1';
 if (isDev) {
   // Keep local file loading behavior while hiding noisy Electron dev warnings.
   process.env.ELECTRON_DISABLE_SECURITY_WARNINGS = 'true';
 }
+
+const APP_LOG_NAME = 'MMD_modoki';
+const appLogSessionId = `${new Date().toISOString().replace(/[-:TZ.]/g, '').slice(0, 14)}-${randomUUID().slice(0, 4)}`;
+
+const createLogErrorData = (err: unknown): AppLogData => {
+  if (err instanceof Error) {
+    return {
+      error: {
+        name: err.name,
+        message: err.message,
+        stack: err.stack,
+      },
+    };
+  }
+  return {
+    error: {
+      message: String(err),
+    },
+  };
+};
+
+const sanitizeLogText = (value: string): string => {
+  if (value.length <= 2000) return value;
+  return `${value.slice(0, 2000)}...(truncated)`;
+};
+
+const sanitizeLogValue = (value: unknown, key = '', depth = 0): unknown => {
+  if (value === null || value === undefined) return value;
+  if (typeof value === 'string') {
+    if (/path/i.test(key)) {
+      return {
+        fileName: path.basename(value),
+        extension: path.extname(value).toLowerCase(),
+      };
+    }
+    return sanitizeLogText(value);
+  }
+  if (typeof value === 'number' || typeof value === 'boolean') return value;
+  if (value instanceof Error) return createLogErrorData(value).error;
+  if (Array.isArray(value)) {
+    if (depth >= 3) return `[array:${value.length}]`;
+    return value.slice(0, 20).map((item, index) => sanitizeLogValue(item, String(index), depth + 1));
+  }
+  if (typeof value === 'object') {
+    if (depth >= 3) return '[object]';
+    const entries = Object.entries(value as Record<string, unknown>).slice(0, 40);
+    return Object.fromEntries(entries.map(([entryKey, entryValue]) => [
+      entryKey,
+      sanitizeLogValue(entryValue, entryKey, depth + 1),
+    ]));
+  }
+  return String(value);
+};
+
+const sanitizeLogData = (data?: AppLogData): AppLogData | undefined => {
+  if (!data) return undefined;
+  const sanitized = sanitizeLogValue(data);
+  if (!sanitized || typeof sanitized !== 'object' || Array.isArray(sanitized)) return undefined;
+  return sanitized as AppLogData;
+};
+
+const configureAppLogging = (): void => {
+  log.initialize({ preload: false, spyRendererConsole: false });
+  log.transports.file.setAppName(APP_LOG_NAME);
+  log.transports.file.fileName = isDev ? 'main-dev.log' : 'main.log';
+  log.transports.file.level = isDev ? 'debug' : 'info';
+  log.transports.file.maxSize = (isDev ? 20 : 5) * 1024 * 1024;
+  log.transports.file.resolvePathFn = (variables) => {
+    const baseLogDir = process.platform === 'darwin'
+      ? path.join(variables.home, 'Library', 'Logs', APP_LOG_NAME)
+      : path.join(variables.appData, APP_LOG_NAME, 'logs');
+    const logDir = isDev ? path.join(baseLogDir, 'dev') : baseLogDir;
+    return path.join(logDir, log.transports.file.fileName);
+  };
+  log.transports.console.level = isDev ? 'debug' : 'info';
+  log.scope.defaultLabel = 'main';
+};
+
+configureAppLogging();
+
+const writeAppLog = (
+  level: AppLogLevel,
+  scope: AppLogScope,
+  message: string,
+  data?: AppLogData,
+): void => {
+  const scopedLog = log.scope(scope);
+  const safeMessage = sanitizeLogText(message);
+  const safeData = sanitizeLogData({
+    sessionId: appLogSessionId,
+    ...(data ?? {}),
+  });
+  if (safeData) {
+    scopedLog[level](safeMessage, safeData);
+  } else {
+    scopedLog[level](safeMessage);
+  }
+};
+
+writeAppLog('info', 'main', 'app start', {
+  appName: APP_LOG_NAME,
+  version: app.getVersion(),
+  electron: process.versions.electron,
+  chromium: process.versions.chrome,
+  node: process.versions.node,
+  platform: process.platform,
+  arch: process.arch,
+  isDev,
+  isPackaged: app.isPackaged,
+});
+
+process.on('uncaughtException', (err) => {
+  writeAppLog('error', 'main', 'uncaught exception', createLogErrorData(err));
+});
+
+process.on('unhandledRejection', (reason) => {
+  writeAppLog('error', 'main', 'unhandled rejection', createLogErrorData(reason));
+});
 
 const configureChromiumGpuFlags = (): void => {
   // Apply before app ready so Chromium picks them up for all packaged builds.
@@ -48,6 +175,12 @@ const MAIN_WINDOW_DEFAULT_HEIGHT = Math.round(MAIN_WINDOW_DEFAULT_WIDTH / MAIN_W
 const MAIN_WINDOW_MIN_WIDTH = 1120;
 const MAIN_WINDOW_MIN_HEIGHT = Math.round(MAIN_WINDOW_MIN_WIDTH / MAIN_WINDOW_ASPECT_RATIO);
 const ALLOWED_PRODUCTION_PROTOCOLS = new Set(['file:', 'data:', 'blob:', 'devtools:']);
+const SMOKE_TEST_TIMEOUT_MS = Math.max(
+  5000,
+  Number.parseInt(process.env.MMD_MODOKI_SMOKE_TIMEOUT_MS ?? '20000', 10) || 20000,
+);
+const SMOKE_TEST_REQUIRE_WEBGPU = process.env.MMD_MODOKI_SMOKE_REQUIRE_WEBGPU !== '0';
+const SMOKE_TEST_RESULT_PATH = process.env.MMD_MODOKI_SMOKE_RESULT_PATH ?? null;
 
 const pngSequenceExportJobMap = new Map<string, PngSequenceExportRequest>();
 const pngSequenceExportActiveCountByOwner = new Map<number, number>();
@@ -249,6 +382,11 @@ const sanitizeWebmExportRequest = (request: WebmExportRequest): WebmExportReques
   const preferredVideoCodec = request.preferredVideoCodec === 'vp8' || request.preferredVideoCodec === 'vp9'
     ? request.preferredVideoCodec
     : 'auto';
+  const captureMode: WebmCaptureMode = request.captureMode === 'canvas'
+    || request.captureMode === 'webgpu-copy'
+    || request.captureMode === 'readpixels'
+    ? request.captureMode
+    : 'readpixels';
   const audioFilePath = includeAudio && typeof request.audioFilePath === 'string' && request.audioFilePath.trim().length > 0
     ? request.audioFilePath
     : null;
@@ -267,6 +405,7 @@ const sanitizeWebmExportRequest = (request: WebmExportRequest): WebmExportReques
     includeAudio,
     audioFilePath,
     preferredVideoCodec,
+    captureMode,
   };
 };
 
@@ -361,6 +500,132 @@ const configureSessionSecurity = (): void => {
   });
 };
 
+const finishSmokeTest = (success: boolean, reason: string, data?: AppLogData): void => {
+  writeAppLog(success ? 'info' : 'error', 'main', `smoke test ${success ? 'passed' : 'failed'}: ${reason}`, data);
+  console.log(`[smoke] ${success ? 'pass' : 'fail'}: ${reason}`);
+  if (SMOKE_TEST_RESULT_PATH) {
+    try {
+      fs.mkdirSync(path.dirname(SMOKE_TEST_RESULT_PATH), { recursive: true });
+      fs.writeFileSync(
+        SMOKE_TEST_RESULT_PATH,
+        JSON.stringify({
+          success,
+          reason,
+          data,
+          createdAt: new Date().toISOString(),
+        }, null, 2),
+        'utf8',
+      );
+    } catch (err) {
+      writeAppLog('warn', 'main', 'failed to write smoke result file', createLogErrorData(err));
+    }
+  }
+  app.exit(success ? 0 : 1);
+};
+
+const setupSmokeTestLifecycle = (mainWindow: BrowserWindow, loadPromise: Promise<void>): void => {
+  if (!isSmokeMode) return;
+
+  let finished = false;
+  let didFinishLoad = false;
+  let removeSmokeIpcListeners = (): void => undefined;
+  const complete = (success: boolean, reason: string, data?: AppLogData): void => {
+    if (finished) return;
+    finished = true;
+    clearTimeout(timeoutId);
+    removeSmokeIpcListeners();
+    finishSmokeTest(success, reason, data);
+  };
+
+  const timeoutId = setTimeout(() => {
+    complete(false, 'timeout waiting for renderer runtime initialization', {
+      timeoutMs: SMOKE_TEST_TIMEOUT_MS,
+      didFinishLoad,
+      webContentsId: mainWindow.webContents.id,
+    });
+  }, SMOKE_TEST_TIMEOUT_MS);
+
+  writeAppLog('info', 'main', 'smoke test enabled', {
+    timeoutMs: SMOKE_TEST_TIMEOUT_MS,
+    requireWebGpu: SMOKE_TEST_REQUIRE_WEBGPU,
+    webContentsId: mainWindow.webContents.id,
+  });
+  console.log(`[smoke] waiting for renderer runtime (${SMOKE_TEST_TIMEOUT_MS}ms timeout, requireWebGPU=${SMOKE_TEST_REQUIRE_WEBGPU})`);
+
+  loadPromise.catch((err: unknown) => {
+    complete(false, 'loadEditorWindow rejected', createLogErrorData(err));
+  });
+
+  mainWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+    if (!isMainFrame) return;
+    complete(false, 'renderer failed to load', {
+      errorCode,
+      errorDescription,
+      validatedURL,
+      isMainFrame,
+      webContentsId: mainWindow.webContents.id,
+    });
+  });
+
+  mainWindow.webContents.once('render-process-gone', (_event, details) => {
+    complete(false, 'renderer process gone', {
+      reason: details.reason,
+      exitCode: details.exitCode,
+      webContentsId: mainWindow.webContents.id,
+    });
+  });
+
+  mainWindow.once('unresponsive', () => {
+    complete(false, 'main window became unresponsive', {
+      webContentsId: mainWindow.webContents.id,
+    });
+  });
+
+  mainWindow.webContents.once('did-finish-load', () => {
+    didFinishLoad = true;
+    writeAppLog('info', 'main', 'smoke main window finished load', {
+      webContentsId: mainWindow.webContents.id,
+    });
+  });
+
+  const onRendererReady = (event: IpcMainEvent, payload: SmokeRendererReadyPayload): void => {
+    if (event.sender.id !== mainWindow.webContents.id) return;
+    const engine = typeof payload?.engine === 'string' ? payload.engine : 'unknown';
+    const physicsBackend = typeof payload?.physicsBackend === 'string' ? payload.physicsBackend : 'unknown';
+    if (SMOKE_TEST_REQUIRE_WEBGPU && engine !== 'WebGPU') {
+      complete(false, 'renderer initialized without WebGPU', {
+        engine,
+        physicsBackend,
+        requireWebGpu: SMOKE_TEST_REQUIRE_WEBGPU,
+        webContentsId: mainWindow.webContents.id,
+      });
+      return;
+    }
+    console.log(`[smoke] renderer ready: engine=${engine} physics=${physicsBackend}`);
+    complete(true, 'renderer runtime initialized', {
+      engine,
+      physicsBackend,
+      webContentsId: mainWindow.webContents.id,
+    });
+  };
+
+  const onRendererFailure = (event: IpcMainEvent, payload: SmokeRendererFailurePayload): void => {
+    if (event.sender.id !== mainWindow.webContents.id) return;
+    complete(false, 'renderer reported initialization failure', {
+      message: typeof payload?.message === 'string' ? payload.message : 'unknown renderer failure',
+      details: payload?.details,
+      webContentsId: mainWindow.webContents.id,
+    });
+  };
+
+  ipcMain.on('smoke:rendererReady', onRendererReady);
+  ipcMain.on('smoke:rendererFailure', onRendererFailure);
+  removeSmokeIpcListeners = () => {
+    ipcMain.removeListener('smoke:rendererReady', onRendererReady);
+    ipcMain.removeListener('smoke:rendererFailure', onRendererFailure);
+  };
+};
+
 const createWindow = () => {
   const mainWindow = new BrowserWindow({
     width: MAIN_WINDOW_DEFAULT_WIDTH,
@@ -380,12 +645,19 @@ const createWindow = () => {
   });
   mainWindow.setMenuBarVisibility(false);
   snapWindowContentAspect(mainWindow, MAIN_WINDOW_ASPECT_RATIO);
+  writeAppLog('info', 'main', 'main window created', {
+    webContentsId: mainWindow.webContents.id,
+    width: MAIN_WINDOW_DEFAULT_WIDTH,
+    height: MAIN_WINDOW_DEFAULT_HEIGHT,
+  });
 
   // Load the app
-  void loadEditorWindow(mainWindow);
+  const loadPromise = loadEditorWindow(mainWindow);
+  setupSmokeTestLifecycle(mainWindow, loadPromise);
+  void loadPromise;
 
   // Open DevTools in dev mode
-  if (MAIN_WINDOW_VITE_DEV_SERVER_URL) {
+  if (MAIN_WINDOW_VITE_DEV_SERVER_URL && !isSmokeMode) {
     mainWindow.webContents.openDevTools();
   }
 
@@ -411,15 +683,61 @@ const createWindow = () => {
 
   mainWindow.once('ready-to-show', () => {
     snapWindowContentAspect(mainWindow, MAIN_WINDOW_ASPECT_RATIO);
+    writeAppLog('debug', 'main', 'main window ready to show', {
+      webContentsId: mainWindow.webContents.id,
+    });
   });
 };
 
 app.on('ready', () => {
+  writeAppLog('info', 'main', 'app ready', {
+    logFilePath: log.transports.file.getFile().path,
+  });
   configureSessionSecurity();
   createWindow();
 });
 
 // IPC Handlers
+ipcMain.on(
+  'log:write',
+  (_event, level: AppLogLevel, scope: AppLogScope, message: string, data?: AppLogData) => {
+    if (!['debug', 'info', 'warn', 'error'].includes(level)) return;
+    if (typeof scope !== 'string' || typeof message !== 'string') return;
+    writeAppLog(level, scope, message, data);
+  },
+);
+
+ipcMain.handle('log:getFileInfo', async (): Promise<AppLogFileInfo> => {
+  const logFile = log.transports.file.getFile();
+  return {
+    path: logFile.path,
+    directoryPath: path.dirname(logFile.path),
+    fileName: path.basename(logFile.path),
+    level: log.transports.file.level as AppLogFileInfo['level'],
+    sessionId: appLogSessionId,
+    appName: APP_LOG_NAME,
+    isDev,
+    maxSizeBytes: log.transports.file.maxSize,
+  };
+});
+
+ipcMain.handle('log:openFolder', async (): Promise<boolean> => {
+  try {
+    const logFile = log.transports.file.getFile();
+    await fs.promises.mkdir(path.dirname(logFile.path), { recursive: true });
+    const result = await shell.openPath(path.dirname(logFile.path));
+    if (result) {
+      writeAppLog('warn', 'ipc', 'failed to open log folder', { message: result });
+      return false;
+    }
+    writeAppLog('info', 'ipc', 'opened log folder');
+    return true;
+  } catch (err: unknown) {
+    writeAppLog('error', 'ipc', 'failed to open log folder', createLogErrorData(err));
+    return false;
+  }
+});
+
 ipcMain.handle('dialog:openFile', async (_event, filters: { name: string; extensions: string[] }[]) => {
   const result = await dialog.showOpenDialog({
     properties: ['openFile'],
@@ -446,18 +764,26 @@ ipcMain.handle('dialog:saveWebm', async (_event, defaultFileName?: string) => {
     const safeName = (defaultFileName && defaultFileName.toLowerCase().endsWith('.webm'))
       ? defaultFileName
       : `${defaultFileName ?? 'mmd_capture'}.webm`;
+    writeAppLog('info', 'webm', 'save dialog opened', {
+      defaultFileName: safeName,
+    });
     const result = await dialog.showSaveDialog({
       title: 'Save WebM',
       defaultPath: path.join(app.getPath('videos'), safeName),
       filters: [{ name: 'WebM Video', extensions: ['webm'] }],
     });
     if (result.canceled || !result.filePath) {
+      writeAppLog('info', 'webm', 'save dialog canceled');
       return null;
     }
+    writeAppLog('info', 'webm', 'save path selected', {
+      outputFilePath: result.filePath,
+    });
     return result.filePath.toLowerCase().endsWith('.webm')
       ? result.filePath
       : `${result.filePath}.webm`;
   } catch (err) {
+    writeAppLog('error', 'webm', 'failed to choose WebM save path', createLogErrorData(err));
     console.error('Failed to choose WebM save path:', err);
     return null;
   }
@@ -974,7 +1300,10 @@ ipcMain.handle(
 
     try {
       const sanitized = sanitizeWebmExportRequest(request);
-      if (!sanitized) return null;
+      if (!sanitized) {
+        writeAppLog('warn', 'webm', 'invalid WebM export request');
+        return null;
+      }
 
       const ownerWindow = BrowserWindow.fromWebContents(event.sender) ?? undefined;
       releaseOwnerExport = retainWebmExportOwner(ownerWindow);
@@ -984,6 +1313,19 @@ ipcMain.handle(
       if (ownerWindow && !ownerWindow.isDestroyed()) {
         webmExportOwnerByJobId.set(jobId, ownerWindow.webContents.id);
       }
+      writeAppLog('info', 'webm', 'starting WebM export window', {
+        jobId,
+        outputFilePath: sanitized.outputFilePath,
+        startFrame: sanitized.startFrame,
+        endFrame: sanitized.endFrame,
+        fps: sanitized.fps,
+        outputWidth: sanitized.outputWidth,
+        outputHeight: sanitized.outputHeight,
+        includeAudio: sanitized.includeAudio,
+        audioFilePath: sanitized.audioFilePath,
+        preferredVideoCodec: sanitized.preferredVideoCodec,
+        ownerWebContentsId: ownerWindow?.webContents.id,
+      });
 
       exportWindow = new BrowserWindow({
         width: sanitized.outputWidth,
@@ -1015,6 +1357,7 @@ ipcMain.handle(
       });
 
       await loadEditorWindow(exportWindow, { mode: 'webm-exporter', jobId });
+      writeAppLog('debug', 'webm', 'WebM export window loaded', { jobId });
 
       return { jobId };
     } catch (err) {
@@ -1022,6 +1365,7 @@ ipcMain.handle(
       if (exportWindow && !exportWindow.isDestroyed()) {
         exportWindow.close();
       }
+      writeAppLog('error', 'webm', 'failed to start WebM export window', createLogErrorData(err));
       console.error('Failed to start WebM export window:', err);
       return null;
     }
@@ -1041,6 +1385,7 @@ ipcMain.handle('export:finishWebmJob', async (event, jobId: string): Promise<boo
   const cleanup = webmExportCleanupByJobId.get(jobId);
   if (!cleanup) return false;
   cleanup();
+  writeAppLog('info', 'webm', 'finished WebM export job', { jobId });
   const exporterWindow = BrowserWindow.fromWebContents(event.sender);
   if (exporterWindow && !exporterWindow.isDestroyed()) {
     exporterWindow.close();

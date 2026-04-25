@@ -41,6 +41,14 @@
           <span data-i18n="toolbar.loadProject.label">プロジェクト読込</span>
         </button>
         <div class="toolbar-toggle-group" role="group" aria-label="表示と機能の切替" data-i18n-aria-label="toolbar.toggleGroup.ariaLabel">
+          <button id="btn-toggle-background" class="toolbar-btn toolbar-btn--compact" title="背景: 未設定" data-i18n-title="toolbar.background.title.unavailable" aria-pressed="false" disabled>
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+              <path d="M2.5 3.5h11v9h-11z" stroke="currentColor" stroke-width="1.2" />
+              <circle cx="5.2" cy="6" r="1" fill="currentColor" />
+              <path d="M4 11l2.2-2.5 1.7 1.7 2.8-3 1.3 1.5" stroke="currentColor" stroke-width="1.2" />
+            </svg>
+            <span id="background-toggle-text" data-i18n="toolbar.background.short">背景</span>
+          </button>
           <button id="btn-toggle-ground" class="toolbar-btn toolbar-btn--compact toggle-on" title="地面表示を切り替える" data-i18n-title="toolbar.ground.title.on" aria-pressed="true">
             <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
               <path d="M1 4h14v8H1z" />
@@ -68,7 +76,7 @@
             </svg>
             <span id="physics-toggle-text" data-i18n="toolbar.physics.short">PHY</span>
           </button>
-          <button id="btn-toggle-shadow" class="toolbar-btn toolbar-btn--compact toggle-on" title="影の有効/無効を切り替える" data-i18n-title="toolbar.shadow.title.on" aria-pressed="true">
+          <button id="btn-toggle-shadow" class="toolbar-btn toolbar-btn--compact toggle-on" title="影の有効/無効を切り替える" data-i18n-title="toolbar.shadow.title.on" aria-pressed="true" hidden>
             <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
               <path d="M8 2.2a4.8 4.8 0 1 0 0 9.6 4.8 4.8 0 0 0 0-9.6z" />
               <path d="M8 2.2a4.8 4.8 0 0 1 0 9.6z" fill="#0b0d12" opacity="0.45" />
@@ -82,22 +90,23 @@
             </svg>
             <span id="gi-toggle-text" data-i18n="toolbar.gi.short">GI</span>
           </button>
-          <button id="btn-toggle-shader-panel" class="toolbar-btn toolbar-btn--compact" title="エフェクト欄の表示/非表示" data-i18n-title="toolbar.fx.title.off" aria-pressed="false">
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2">
-              <rect x="2.2" y="3" width="11.6" height="10" rx="1.2" />
-              <path d="M6 5.2v5.6M8.5 5.2v5.6M11 5.2v5.6" />
-            </svg>
-            <span id="shader-panel-toggle-text" data-i18n="toolbar.fx.short">FX</span>
-          </button>
-          <button id="btn-toggle-fullscreen-ui" class="toolbar-btn toolbar-btn--compact" title="UIを非表示/表示 (ESCで戻る)" data-i18n-title="toolbar.ui.title.off" aria-pressed="false">
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
-              <path d="M2 6V2h4M10 2h4v4M14 10v4h-4M6 14H2v-4" />
-            </svg>
-            <span id="fullscreen-ui-toggle-text" data-i18n="toolbar.ui.short">UI</span>
-          </button>
         </div>
       </div>
       <div class="toolbar-right">
+        <button id="btn-toggle-shader-panel" class="toolbar-btn toolbar-btn--compact" title="エフェクト欄の表示/非表示" data-i18n-title="toolbar.fx.title.off" aria-pressed="false">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2">
+            <rect x="2.2" y="3" width="11.6" height="10" rx="1.2" />
+            <path d="M6 5.2v5.6M8.5 5.2v5.6M11 5.2v5.6" />
+          </svg>
+          <span id="shader-panel-toggle-text" data-i18n="toolbar.fx.short">FX</span>
+        </button>
+        <button id="btn-toggle-fullscreen-ui" class="toolbar-btn toolbar-btn--compact" title="UIを非表示/表示 (ESCで戻る)" data-i18n-title="toolbar.ui.title.off" aria-pressed="false">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
+            <path d="M2 6V2h4M10 2h4v4M14 10v4h-4M6 14H2v-4" />
+          </svg>
+          <span id="fullscreen-ui-toggle-text" data-i18n="toolbar.ui.short">UI</span>
+        </button>
+        <span class="toolbar-locale-label" data-i18n="toolbar.locale.label">Language</span>
         <select
           id="toolbar-locale-select"
           class="toolbar-locale-select"
@@ -153,15 +162,10 @@
                     <path d="M5 3l12 7-12 7V3z" />
                   </svg>
                 </button>
-                <button id="btn-pause" class="transport-btn" title="一時停止 (P / Space)" data-i18n-title="playback.pause.title" style="display:none;">
+                <button id="btn-pause" class="transport-btn play-btn" title="一時停止 (P / Space)" data-i18n-title="playback.pause.title" style="display:none;">
                   <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
                     <rect x="4" y="3" width="4" height="14" />
                     <rect x="12" y="3" width="4" height="14" />
-                  </svg>
-                </button>
-                <button id="btn-stop" class="transport-btn" title="停止" data-i18n-title="playback.stop.title">
-                  <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
-                    <rect x="3" y="3" width="10" height="10" />
                   </svg>
                 </button>
                 <button id="btn-skip-end" class="transport-btn" title="末尾へ (End)" data-i18n-title="playback.skipEnd.title">
@@ -170,21 +174,97 @@
                   </svg>
                 </button>
               </div>
-              <div class="playback-step-buttons">
-                <button id="btn-kf-nudge-left" class="transport-btn playback-step-btn" type="button" title="選択キーを1フレーム前へ (Alt+←)" data-i18n-title="playback.nudgeLeft.title">
-                  <span aria-hidden="true">&larr;</span>
-                </button>
-                <button id="btn-kf-nudge-right" class="transport-btn playback-step-btn" type="button" title="選択キーを1フレーム後へ (Alt+→)" data-i18n-title="playback.nudgeRight.title">
-                  <span aria-hidden="true">&rarr;</span>
-                </button>
+            </div>
+            <div class="playback-range-row">
+              <div class="playback-range-group">
+                <div class="playback-frame-range">
+                  <input
+                    id="output-start-frame"
+                    class="output-number playback-range-input"
+                    type="number"
+                    min="0"
+                    step="1"
+                    value="0"
+                    data-i18n-placeholder="output.range.start"
+                    placeholder="スタート"
+                  >
+                  <span class="playback-range-sep">～</span>
+                  <input
+                    id="output-end-frame"
+                    class="output-number playback-range-input"
+                    type="number"
+                    min="0"
+                    step="1"
+                    value="0"
+                    data-i18n-placeholder="output.range.end"
+                    placeholder="ストップ"
+                  >
+                </div>
               </div>
-              <div class="frame-display">
-                <span class="frame-label" data-i18n="label.frame">Frame</span>
-                <span id="current-frame" class="frame-number">0</span>
-                <span class="frame-separator">/</span>
-                <span id="total-frames" class="frame-number">0</span>
+            </div>
+            <div class="playback-toggle-row">
+              <label class="playback-toggle-label" title="再生を指定スタートフレームから始める" data-i18n-title="playback.frameStart.title">
+                <input id="playback-frame-start-toggle" type="checkbox">
+                <span data-i18n="playback.frameStart.label">フレ・スタート</span>
+              </label>
+              <label class="playback-toggle-label playback-toggle-label--right" title="停止時に現在フレームへ留まる" data-i18n-title="playback.frameStop.title">
+                <input id="playback-frame-stop-toggle" type="checkbox">
+                <span data-i18n="playback.frameStop.label">フレ・ストップ</span>
+              </label>
+            </div>
+          </div>
+        </section>
+
+        <section id="timeline-section" class="left-panel-section left-panel-section--timeline">
+          <div class="panel-header">
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor">
+              <path d="M1 1h12v2H1V1zm0 4h12v2H1V5zm0 4h12v2H1V9z" />
+            </svg>
+            <span data-i18n="section.timeline">タイムライン</span>
+          </div>
+          <div id="timeline-edit-toolbar">
+            <div class="timeline-nav-row">
+              <div class="timeline-nav-main timeline-nav-main--mmd">
+                <div class="timeline-nav-group timeline-nav-group--left">
+                  <button id="btn-frame-range-start" class="timeline-nav-btn timeline-nav-btn--mmd" type="button" title="開始フレームへ">
+                    <span aria-hidden="true">|&lt;</span>
+                  </button>
+                  <button id="btn-kf-nudge-left" class="timeline-nav-btn timeline-nav-btn--mmd" type="button" title="前のキーへ">
+                    <span aria-hidden="true">.&lt;</span>
+                  </button>
+                  <button id="btn-frame-step-left" class="timeline-nav-btn timeline-nav-btn--mmd" type="button" title="1フレーム戻る">
+                    <span aria-hidden="true">&lt;</span>
+                  </button>
+                </div>
+                <div class="timeline-nav-frame-box">
+                  <input
+                    id="current-frame"
+                    class="timeline-nav-frame-input"
+                    type="number"
+                    min="0"
+                    step="1"
+                    value="0"
+                    inputmode="numeric"
+                    aria-label="Current frame"
+                  >
+                  <span id="total-frames" hidden>0</span>
+                </div>
+                <div class="timeline-nav-group timeline-nav-group--right">
+                  <button id="btn-frame-step-right" class="timeline-nav-btn timeline-nav-btn--mmd" type="button" title="1フレーム進む">
+                    <span aria-hidden="true">&gt;</span>
+                  </button>
+                  <button id="btn-kf-nudge-right" class="timeline-nav-btn timeline-nav-btn--mmd" type="button" title="次のキーへ">
+                    <span aria-hidden="true">&gt;.</span>
+                  </button>
+                  <button id="btn-frame-range-end" class="timeline-nav-btn timeline-nav-btn--mmd" type="button" title="終了フレームへ">
+                    <span aria-hidden="true">&gt;|</span>
+                  </button>
+                </div>
               </div>
-              <div class="volume-control">
+            </div>
+            <div class="timeline-waveform-row">
+              <div class="timeline-waveform-spacer" aria-hidden="true"></div>
+              <div class="volume-control timeline-waveform-volume">
                 <button id="btn-mute" class="volume-mute-btn" title="ミュート切替" data-i18n-title="playback.mute.title">
                   <svg id="icon-volume-on" width="14" height="14" viewBox="0 0 14 14" fill="currentColor">
                     <path d="M2 5h3l4-3v10l-4-3H2V5zm8 .5a3 3 0 0 1 0 3" stroke="currentColor" stroke-width="1.2"
@@ -198,25 +278,10 @@
                   </svg>
                 </button>
                 <input type="range" id="volume-slider" class="volume-slider" min="0" max="100" value="100" step="1">
-                <span id="volume-value" class="volume-value">100%</span>
+                <span id="volume-value" class="volume-value" hidden>100%</span>
               </div>
+              <canvas id="timeline-waveform-canvas" aria-label="Waveform preview"></canvas>
             </div>
-          </div>
-        </section>
-
-        <section id="timeline-section" class="left-panel-section left-panel-section--timeline">
-          <div class="panel-header">
-            <svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor">
-              <path d="M1 1h12v2H1V1zm0 4h12v2H1V5zm0 4h12v2H1V9z" />
-            </svg>
-            <span data-i18n="section.timeline">タイムライン</span>
-          </div>
-          <div id="timeline-edit-toolbar">
-            <div class="timeline-edit-buttons">
-              <button id="btn-kf-add" class="timeline-edit-btn" type="button" title="現在フレームにキーフレームを登録 (Enter / I / K / +)" data-i18n-title="timeline.key.add.title" data-i18n="button.register">登録</button>
-              <button id="btn-kf-delete" class="timeline-edit-btn" type="button" title="選択キーフレームを削除 (Delete)" data-i18n-title="timeline.key.delete.title" data-i18n="button.delete">削除</button>
-            </div>
-            <span id="timeline-selection-label" class="timeline-selection-label" data-i18n="empty.trackNotSelected">トラック未選択</span>
           </div>
           <div id="timeline-container">
             <!-- Fixed left: frame labels -->
@@ -229,6 +294,12 @@
               <div id="timeline-tracks-scroll">
                 <canvas id="timeline-canvas"></canvas>
               </div>
+            </div>
+          </div>
+          <div id="timeline-action-toolbar">
+            <div class="timeline-edit-buttons">
+              <button id="btn-kf-add" class="timeline-edit-btn" type="button" title="現在フレームにキーフレームを登録 (Enter / I / K / +)" data-i18n-title="timeline.key.add.title" data-i18n="button.register">登録</button>
+              <button id="btn-kf-delete" class="timeline-edit-btn" type="button" title="選択キーフレームを削除 (Delete)" data-i18n-title="timeline.key.delete.title" data-i18n="button.delete">削除</button>
             </div>
           </div>
         </section>
@@ -277,8 +348,9 @@
             </select>
           </div>
           <div class="shader-panel-actions">
-            <button id="btn-shader-apply" class="info-action-btn" type="button" disabled data-i18n="button.applyAllMaterials">全材質へ割り当て</button>
-            <button id="btn-shader-reset" class="info-action-btn" type="button" disabled data-i18n="button.resetAllMaterials">全材質を標準化</button>
+            <button id="btn-shader-apply-all" class="info-action-btn" type="button" disabled data-i18n="shader.apply.all">全材質へ割り当て</button>
+            <button id="btn-shader-apply-selected" class="info-action-btn" type="button" disabled data-i18n="shader.apply.selected">選択へ割り当て</button>
+            <button id="btn-shader-reset" class="info-action-btn info-action-btn--span-all" type="button" disabled data-i18n="shader.reset.all" hidden>全材質を標準化</button>
           </div>
           <div id="shader-panel-note" class="shader-panel-note" data-i18n="empty.loadModel">モデルを読み込んでください</div>
           <div id="shader-material-list" class="shader-material-list">
@@ -345,17 +417,26 @@
           <div class="model-info interpolation-info">
             <div class="info-row interpolation-row--hidden"><span class="info-label" data-i18n="label.target">対象</span><span id="interp-track-name" class="info-value">-</span></div>
             <div class="info-row interpolation-row--hidden"><span class="info-label" data-i18n="label.frame">フレーム</span><span id="interp-frame" class="info-value">-</span></div>
-            <div class="interpolation-meta">
-              <div class="info-row">
-                <span class="info-label" data-i18n="label.type">種別</span>
+            <div class="interpolation-meta interpolation-meta--top">
+              <div class="interp-type-row">
+                <span class="info-label interpolation-side-label" data-i18n="label.type">種別</span>
                 <select id="interp-type" class="interp-type-select" disabled>
                   <option value="__all__" data-i18n="option.all">全て</option>
                 </select>
               </div>
               <div class="info-row interpolation-row--hidden"><span class="info-label" data-i18n="label.status">状態</span><span id="interp-status" class="info-value" data-i18n="status.preparing">準備中</span></div>
             </div>
-            <div id="interp-curve-list" class="interp-curve-list">
-              <div class="interp-curve-empty" data-i18n="empty.selectTrackToShow">トラックを選択すると表示されます</div>
+            <div class="interpolation-workbench">
+              <div id="interp-curve-list" class="interp-curve-list">
+                <div class="interp-curve-empty" data-i18n="empty.selectTrackToShow">トラックを選択すると表示されます</div>
+              </div>
+              <div class="interpolation-side">
+                <div class="interp-placeholder-actions">
+                  <button id="btn-interp-copy" class="info-action-btn interp-placeholder-btn" type="button">コピー</button>
+                  <button id="btn-interp-paste" class="info-action-btn interp-placeholder-btn" type="button">ペースト</button>
+                  <button id="btn-interp-linear" class="info-action-btn interp-placeholder-btn" type="button">線形</button>
+                </div>
+              </div>
             </div>
           </div>
         </section>
@@ -458,6 +539,18 @@
                 <span class="effect-label" data-i18n="label.dofFocus">DoFフォーカス</span>
                 <input type="range" id="effect-dof-focus" class="effect-slider" min="100" max="300000" value="55000" step="100">
                 <span id="effect-dof-focus-val" class="effect-value">55.0m</span>
+              </div>
+              <div class="effect-row effect-row-select-only">
+                <span class="effect-label" data-i18n="label.dofTargetModel">DoF中心モデル</span>
+                <select id="effect-dof-target-model" class="effect-select">
+                  <option value="" data-i18n="option.cameraTarget">カメラ注視点</option>
+                </select>
+              </div>
+              <div class="effect-row effect-row-select-only">
+                <span class="effect-label" data-i18n="label.dofTargetBone">DoF中心ボーン</span>
+                <select id="effect-dof-target-bone" class="effect-select" disabled>
+                  <option value="" data-i18n="option.none">なし</option>
+                </select>
               </div>
               <div class="effect-row">
                 <span class="effect-label" data-i18n="label.dofOffset">前後補正</span>
@@ -630,11 +723,6 @@
               <input type="range" id="light-direction-z" class="light-slider" min="-1" max="1" value="0.60" step="0.01">
               <span id="light-direction-z-val" class="light-value">0.60</span>
             </div>
-                <div class="light-row light-row--shadow">
-              <span class="light-label" data-i18n="label.shadowStrength">照度</span>
-              <input type="range" id="light-intensity" class="light-slider" min="0" max="200" value="100" step="1">
-              <span id="light-intensity-val" class="light-value">1.0</span>
-            </div>
             <div class="light-row light-row--light light-row--always-hidden" hidden>
               <span class="light-label" data-i18n="label.ambientLight">環境光</span>
               <input type="range" id="light-ambient" class="light-slider" min="0" max="200" value="0" step="1">
@@ -665,31 +753,6 @@
               <input type="range" id="light-flat-color-influence" class="light-slider" min="0" max="100" value="35" step="1">
               <span id="light-flat-color-influence-val" class="light-value">35%</span>
             </div>
-            <div class="light-row light-row--shadow light-row--always-hidden" hidden>
-              <span class="light-label" data-i18n="label.shadowDarkness">影の濃さ</span>
-              <input type="range" id="light-shadow" class="light-slider" min="0" max="100" value="0" step="1">
-              <span id="light-shadow-val" class="light-value">0.00</span>
-            </div>
-            <div class="light-row light-row--shadow light-row--always-hidden" hidden>
-              <span class="light-label" data-i18n="label.shadowFrustumSize">影範囲</span>
-              <input type="range" id="light-shadow-frustum-size" class="light-slider" min="120" max="6000" value="220" step="20">
-              <span id="light-shadow-frustum-size-val" class="light-value">220</span>
-            </div>
-            <div class="light-row light-row--shadow">
-              <span class="light-label" data-i18n="label.shadowMaxZ">影描画距離</span>
-              <input type="range" id="light-shadow-max-z" class="light-slider" min="500" max="12000" value="4800" step="50">
-              <span id="light-shadow-max-z-val" class="light-value">4800</span>
-            </div>
-            <div class="light-row light-row--shadow light-row--always-hidden" hidden>
-              <span class="light-label" data-i18n="label.shadowBias">Shadow Bias</span>
-              <input type="range" id="light-shadow-bias" class="light-slider" min="0" max="10000" value="500" step="1">
-              <span id="light-shadow-bias-val" class="light-value">0.00050</span>
-            </div>
-            <div class="light-row light-row--shadow light-row--always-hidden" hidden>
-              <span class="light-label" data-i18n="label.shadowNormalBias">Normal Bias</span>
-              <input type="range" id="light-shadow-normal-bias" class="light-slider" min="0" max="2000" value="1000" step="1">
-              <span id="light-shadow-normal-bias-val" class="light-value">0.01000</span>
-            </div>
             <div class="light-row light-row--shadow">
               <span class="light-label" data-i18n="label.shadowColorR">影色R</span>
               <input type="range" id="light-shadow-color-r" class="light-slider" min="0" max="255" value="38" step="1">
@@ -710,6 +773,21 @@
               <input type="range" id="light-toon-shadow-influence" class="light-slider" min="0" max="100" value="100" step="1">
               <span id="light-toon-shadow-influence-val" class="light-value">100%</span>
             </div>
+            <div class="light-row light-row--shadow">
+              <span class="light-label" data-i18n="label.shadowMaxZ">影描画距離</span>
+              <input type="range" id="light-shadow-max-z" class="light-slider" min="500" max="12000" value="4800" step="50">
+              <span id="light-shadow-max-z-val" class="light-value">4800</span>
+            </div>
+            <div class="light-row light-row--shadow light-row--always-hidden" hidden>
+              <span class="light-label" data-i18n="label.shadowBias">Shadow Bias</span>
+              <input type="range" id="light-shadow-bias" class="light-slider" min="0" max="10000" value="500" step="1">
+              <span id="light-shadow-bias-val" class="light-value">0.00050</span>
+            </div>
+            <div class="light-row light-row--shadow light-row--always-hidden" hidden>
+              <span class="light-label" data-i18n="label.shadowNormalBias">Normal Bias</span>
+              <input type="range" id="light-shadow-normal-bias" class="light-slider" min="0" max="2000" value="1000" step="1">
+              <span id="light-shadow-normal-bias-val" class="light-value">0.01000</span>
+            </div>
             <div class="light-row light-row--shadow light-row--always-hidden" hidden>
               <span class="light-label" data-i18n="label.selfShadowEdge">セルフ影境界</span>
               <input type="range" id="light-self-shadow-softness" class="light-slider" min="5" max="120" value="50" step="1">
@@ -719,6 +797,21 @@
               <span class="light-label" data-i18n="label.occlusionShadowEdge">遮蔽影境界</span>
               <input type="range" id="light-occlusion-shadow-softness" class="light-slider" min="5" max="120" value="10" step="1">
               <span id="light-occlusion-shadow-softness-val" class="light-value">0.010</span>
+            </div>
+            <div class="light-row light-row--shadow">
+              <span class="light-label" data-i18n="label.shadowStrength">照度</span>
+              <input type="range" id="light-intensity" class="light-slider" min="0" max="200" value="100" step="1">
+              <span id="light-intensity-val" class="light-value">1.0</span>
+            </div>
+            <div class="light-row light-row--shadow light-row--always-hidden" hidden>
+              <span class="light-label" data-i18n="label.shadowDarkness">影の濃さ</span>
+              <input type="range" id="light-shadow" class="light-slider" min="0" max="100" value="0" step="1">
+              <span id="light-shadow-val" class="light-value">0.00</span>
+            </div>
+            <div class="light-row light-row--shadow light-row--always-hidden" hidden>
+              <span class="light-label" data-i18n="label.shadowFrustumSize">影範囲</span>
+              <input type="range" id="light-shadow-frustum-size" class="light-slider" min="120" max="6000" value="220" step="20">
+              <span id="light-shadow-frustum-size-val" class="light-value">220</span>
             </div>
           </div>
         </section>
@@ -867,6 +960,20 @@
                   <span data-i18n="label.audioIncluded">音声あり</span>
                 </label>
               </div>
+            </div>
+            <div class="output-row output-row-toggle">
+              <span class="output-label" data-i18n="label.range">範囲</span>
+              <label class="output-toggle-label">
+                <input id="output-use-playback-range" type="checkbox">
+                <span data-i18n="output.usePlaybackRange">再生範囲を使う</span>
+              </label>
+            </div>
+            <div class="output-row">
+              <span class="output-label">方式</span>
+              <select id="output-webm-capture-mode" class="output-select">
+                <option value="readpixels">安定</option>
+                <option value="webgpu-copy" selected>速度優先</option>
+              </select>
             </div>
           </div>
         </section>
